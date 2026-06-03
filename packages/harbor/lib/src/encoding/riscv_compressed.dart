@@ -106,7 +106,7 @@ const cbType = HarborBitStruct({
   'rs1_prime': HarborBitRange(7, 9),
   'offset_hi': HarborBitRange(10, 12),
   'funct3': HarborBitRange(13, 15),
-});
+}, name: 'CBType');
 
 /// CJ-type: compressed jump.
 ///
@@ -115,7 +115,7 @@ const cjType = HarborBitStruct({
   'op': HarborBitRange(0, 1),
   'jump_target': HarborBitRange(2, 12),
   'funct3': HarborBitRange(13, 15),
-});
+}, name: 'CJType');
 
 /// Compressed instruction opcodes (bits 1:0).
 ///

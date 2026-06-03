@@ -161,7 +161,7 @@ class HarborDdrConfig with HarborPrettyString {
 /// - ECP5: uses ECLK/DQSBUF primitives (LiteDRAM pattern)
 /// - Xilinx 7: uses MIG (Memory Interface Generator) IP
 ///
-/// This module provides the controller logic; the PHY is
+/// This module provides the controller logic. The PHY is
 /// instantiated separately or via a vendor-specific wrapper.
 class HarborDdrController extends BridgeModule
     with HarborDeviceTreeNodeProvider {

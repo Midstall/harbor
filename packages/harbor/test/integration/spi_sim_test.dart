@@ -63,7 +63,7 @@ void main() {
       await tb.init();
 
       await tb.waitCycles(2);
-      // spi_cs_n is ~csReg; csReg resets to 0, so cs_n should be high (1)
+      // spi_cs_n is ~csReg. csReg resets to 0, so cs_n should be high (1)
       expect(spi.output('spi_cs_n').value.toInt(), equals(1));
 
       await Simulator.endSimulation();

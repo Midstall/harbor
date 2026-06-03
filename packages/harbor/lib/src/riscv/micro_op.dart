@@ -64,6 +64,48 @@ enum RiscVAluFunct {
   divuw,
   remw,
   remuw,
+  // Zbb: logical-with-negate, min/max, rotates, counts, extends, byte ops
+  andn,
+  orn,
+  xnor,
+  minOp,
+  maxOp,
+  minuOp,
+  maxuOp,
+  rol,
+  ror,
+  rolw,
+  rorw,
+  clz,
+  ctz,
+  cpop,
+  clzw,
+  ctzw,
+  cpopw,
+  sextb,
+  sexth,
+  zexth,
+  orcb,
+  rev8,
+  // Zba: shift-add (and unsigned-word forms)
+  sh1add,
+  sh2add,
+  sh3add,
+  adduw,
+  sh1adduw,
+  sh2adduw,
+  sh3adduw,
+  // Zbs: single-bit
+  bset,
+  bclr,
+  binv,
+  bext,
+  // Zicond: conditional zero
+  czeroEqz,
+  czeroNez,
+  // Zcb unary helpers
+  zextb,
+  notOp,
 }
 
 /// RiscVBranch conditions.

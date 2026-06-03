@@ -40,9 +40,21 @@ class RiscVExtension {
   });
 
   /// Finds an operation by opcode and optional funct fields.
-  RiscVOperation? findOperation(int opcode, {int? funct3, int? funct7}) {
+  ///
+  /// When [instruction] (the raw word) is provided, raw-bit discriminators
+  /// ([RiscVOperation.matchesRaw]) are also applied, so overlapping encodings
+  /// (e.g. c.mv vs c.add) resolve to the correct operation.
+  RiscVOperation? findOperation(
+    int opcode, {
+    int? funct3,
+    int? funct7,
+    int? instruction,
+  }) {
     for (final op in operations) {
-      if (op.matches(opcode, funct3, funct7)) return op;
+      if (op.matches(opcode, funct3, funct7) &&
+          (instruction == null || op.matchesRaw(instruction))) {
+        return op;
+      }
     }
     return null;
   }

@@ -80,6 +80,14 @@ class JtagRemote {
       client.setOption(SocketOption.tcpNoDelay, true);
       print('JTAG remote bitbang: client connected');
 
+      // A write to the socket (the 'R' TDO response) is buffered and flushed
+      // asynchronously. If the peer (OpenOCD) closes the connection while a
+      // write is in flight, the failure surfaces on the sink's `done` future
+      // rather than at the `add` call site, so it escapes the try/catch below
+      // and would otherwise crash the whole simulation. Swallow it here and
+      // treat it as a normal disconnect.
+      unawaited(client.done.catchError((Object _) => client));
+
       try {
         await _handleClient(client);
       } catch (e) {

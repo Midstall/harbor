@@ -144,7 +144,7 @@ class HarborBusFabric extends BridgeModule {
 
     // Note: actual signal interconnect is handled by HarborSoC.buildFabric()
     // which uses rohd_bridge's connectInterfaces. The fabric module provides
-    // the port/interface structure and address map; the SoC wires them.
+    // the port/interface structure and address map. The SoC wires them.
   }
 
   /// Returns the address map as a list of [HarborAddressMapping].

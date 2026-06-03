@@ -94,6 +94,31 @@ class Ice40SbRam40_4k extends BridgeModule {
   }
 }
 
+/// iCE40 SB_RAM40_4KNR - 4Kbit BRAM with negative-edge read clock.
+///
+/// Identical to [Ice40SbRam40_4k] but the read port samples on the falling
+/// edge of `RCLK`. Driving `RCLK` with the normal clock keeps the read in the
+/// same clock domain (phase-related), so a read launched against a posedge
+/// register is correctly timed, unlike feeding an inverted clock to a plain
+/// SB_RAM40_4K, which the tools treat as an independent domain.
+class Ice40SbRam40_4kNR extends BridgeModule {
+  Ice40SbRam40_4kNR({super.name = 'bram'})
+    : super('SB_RAM40_4KNR', isSystemVerilogLeaf: true) {
+    createPort('RDATA', PortDirection.output, width: 16);
+    createPort('RADDR', PortDirection.input, width: 11);
+    // Negedge read clock port is named RCLKN on the NR variant.
+    createPort('RCLKN', PortDirection.input);
+    createPort('RCLKE', PortDirection.input);
+    createPort('RE', PortDirection.input);
+    createPort('WDATA', PortDirection.input, width: 16);
+    createPort('WADDR', PortDirection.input, width: 11);
+    createPort('WCLK', PortDirection.input);
+    createPort('WCLKE', PortDirection.input);
+    createPort('WE', PortDirection.input);
+    createPort('MASK', PortDirection.input, width: 16);
+  }
+}
+
 /// iCE40 SB_SPRAM256KA - 256Kbit single-port RAM.
 class Ice40SbSpram256ka extends BridgeModule {
   Ice40SbSpram256ka({super.name = 'spram'})

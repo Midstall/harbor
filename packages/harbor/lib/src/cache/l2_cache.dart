@@ -117,7 +117,7 @@ class HarborL2Cache extends BridgeModule {
           // MESI: 4 states (adds Exclusive)
           // MOESI: 5 states (adds Owned)
           //
-          // Framework provides the structure; River fills in the details.
+          // Framework provides the structure. River fills in the details.
         ],
       ),
     ]);

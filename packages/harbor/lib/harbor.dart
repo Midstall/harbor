@@ -103,6 +103,7 @@ export 'src/encoding/riscv_csr.dart';
 export 'src/encoding/riscv_formats.dart';
 export 'src/encoding/riscv_hypervisor.dart';
 export 'src/encoding/riscv_vector.dart';
+export 'src/encoding/rvc_immediate.dart';
 
 // Media
 export 'src/media/audio.dart';
@@ -145,6 +146,7 @@ export 'src/peripherals/pcie.dart';
 export 'src/peripherals/plic.dart';
 export 'src/peripherals/pmu.dart';
 export 'src/peripherals/pwm_timer.dart';
+export 'src/peripherals/register_file.dart';
 export 'src/peripherals/reset_controller.dart';
 export 'src/peripherals/sdio.dart';
 export 'src/peripherals/spi.dart';

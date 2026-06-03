@@ -100,7 +100,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
   /// Creates a HarborMaskRom from an ELF file.
   ///
   /// Loads all PT_LOAD segments and flattens them into words.
-  /// The base address can be overridden; otherwise uses the
+  /// The base address can be overridden. Otherwise uses the
   /// ELF's physical addresses.
   factory HarborMaskRom.fromElf(
     File file, {

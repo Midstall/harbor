@@ -3,7 +3,7 @@ import 'dart:async';
 /// A deferred value container for inter-task communication during
 /// elaboration.
 ///
-/// One task calls [load] to provide the value; other tasks `await`
+/// One task calls [load] to provide the value. Other tasks `await`
 /// [value] to receive it. A [HarborHandle] can only be loaded once.
 ///
 /// ```dart

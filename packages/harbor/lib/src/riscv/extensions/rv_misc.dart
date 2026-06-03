@@ -1,5 +1,6 @@
 import '../../encoding/riscv_formats.dart';
 import '../../encoding/riscv_compressed.dart';
+import '../../encoding/rvc_immediate.dart';
 import '../extension.dart';
 import '../micro_op.dart';
 import '../operation.dart';
@@ -248,8 +249,10 @@ final rvZcb = RiscVExtension(
     RiscVOperation(
       mnemonic: 'c.lbu',
       opcode: CompressedOp.c0,
-      funct3: 0x1,
+      funct3: 0x4,
       format: clType,
+      matchMask: 0x7 << 10, // inst[12:10] = 000
+      immKind: RvcImm.clb,
       resources: [
         RfResource(_int, rs1),
         RfResource(_int, rd),
@@ -269,8 +272,11 @@ final rvZcb = RiscVExtension(
     RiscVOperation(
       mnemonic: 'c.lhu',
       opcode: CompressedOp.c0,
-      funct3: 0x1,
+      funct3: 0x4,
       format: clType,
+      matchMask: (0x7 << 10) | (1 << 6), // inst[12:10]=001, inst[6]=0
+      matchValue: 1 << 10,
+      immKind: RvcImm.clh,
       resources: [
         RfResource(_int, rs1),
         RfResource(_int, rd),
@@ -290,8 +296,11 @@ final rvZcb = RiscVExtension(
     RiscVOperation(
       mnemonic: 'c.lh',
       opcode: CompressedOp.c0,
-      funct3: 0x1,
+      funct3: 0x4,
       format: clType,
+      matchMask: (0x7 << 10) | (1 << 6), // inst[12:10]=001, inst[6]=1
+      matchValue: (1 << 10) | (1 << 6),
+      immKind: RvcImm.clh,
       resources: [
         RfResource(_int, rs1),
         RfResource(_int, rd),
@@ -310,8 +319,11 @@ final rvZcb = RiscVExtension(
     RiscVOperation(
       mnemonic: 'c.sb',
       opcode: CompressedOp.c0,
-      funct3: 0x2,
+      funct3: 0x4,
       format: csType,
+      matchMask: 0x7 << 10, // inst[12:10] = 010
+      matchValue: 2 << 10,
+      immKind: RvcImm.clb,
       resources: [
         RfResource(_int, rs1),
         RfResource(_int, rs2),
@@ -331,8 +343,11 @@ final rvZcb = RiscVExtension(
     RiscVOperation(
       mnemonic: 'c.sh',
       opcode: CompressedOp.c0,
-      funct3: 0x2,
+      funct3: 0x4,
       format: csType,
+      matchMask: (0x7 << 10) | (1 << 6), // inst[12:10]=011, inst[6]=0
+      matchValue: 3 << 10,
+      immKind: RvcImm.clh,
       resources: [
         RfResource(_int, rs1),
         RfResource(_int, rs2),
@@ -354,9 +369,16 @@ final rvZcb = RiscVExtension(
       opcode: CompressedOp.c1,
       funct3: C1Funct3.cMisc,
       format: caType,
+      matchMask: 0x1F << 2,
+      matchValue: 0x18 << 2,
       resources: [RfResource(_int, rs1), RfResource(_int, rd)],
       microcode: [
         RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVAlu(
+          RiscVAluFunct.zextb,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rs1,
+        ),
         RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.alu),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
       ],
@@ -366,9 +388,16 @@ final rvZcb = RiscVExtension(
       opcode: CompressedOp.c1,
       funct3: C1Funct3.cMisc,
       format: caType,
+      matchMask: 0x1F << 2,
+      matchValue: 0x19 << 2,
       resources: [RfResource(_int, rs1), RfResource(_int, rd)],
       microcode: [
         RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVAlu(
+          RiscVAluFunct.sextb,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rs1,
+        ),
         RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.alu),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
       ],
@@ -378,9 +407,16 @@ final rvZcb = RiscVExtension(
       opcode: CompressedOp.c1,
       funct3: C1Funct3.cMisc,
       format: caType,
+      matchMask: 0x1F << 2,
+      matchValue: 0x1A << 2,
       resources: [RfResource(_int, rs1), RfResource(_int, rd)],
       microcode: [
         RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVAlu(
+          RiscVAluFunct.zexth,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rs1,
+        ),
         RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.alu),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
       ],
@@ -390,9 +426,16 @@ final rvZcb = RiscVExtension(
       opcode: CompressedOp.c1,
       funct3: C1Funct3.cMisc,
       format: caType,
+      matchMask: 0x1F << 2,
+      matchValue: 0x1B << 2,
       resources: [RfResource(_int, rs1), RfResource(_int, rd)],
       microcode: [
         RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVAlu(
+          RiscVAluFunct.sexth,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rs1,
+        ),
         RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.alu),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
       ],
@@ -402,9 +445,16 @@ final rvZcb = RiscVExtension(
       opcode: CompressedOp.c1,
       funct3: C1Funct3.cMisc,
       format: caType,
+      matchMask: 0x1F << 2,
+      matchValue: 0x1D << 2,
       resources: [RfResource(_int, rs1), RfResource(_int, rd)],
       microcode: [
         RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVAlu(
+          RiscVAluFunct.notOp,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rs1,
+        ),
         RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.alu),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
       ],

@@ -214,39 +214,91 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
     Logic we,
     Logic ack,
   ) {
-    if (size <= 32768 && dataWidth <= 16) {
-      // Use SPRAM (256Kbit = 32KB, 16-bit wide)
-      final spram = Ice40SbSpram256ka(name: 'spram_0');
-      addSubModule(spram);
+    // iCE40 SPRAM (SB_SPRAM256KA): 16384 x 16-bit = 32KB each. up5k has 4
+    // (128KB total). Pair SPRAMs across the data width and bank them across
+    // depth, with an address-decoded read mux. Byte lanes are written whole
+    // (MASKWREN=0xF), matching the bus's word-granular writes.
+    const spramDepth = 16384;
+    const spramWidth = 16;
+    const spramAddrBits = 14;
 
-      spram.input('CLOCK').srcConnection! <= clk;
-      spram.input('CHIPSELECT').srcConnection! <= Const(1);
-      spram.input('STANDBY').srcConnection! <= Const(0);
-      spram.input('SLEEP').srcConnection! <= Const(0);
-      spram.input('POWEROFF').srcConnection! <= Const(1);
-      spram.input('ADDRESS').srcConnection! <= wordAddr.zeroExtend(14);
-      spram.input('DATAIN').srcConnection! <= datIn.zeroExtend(16);
-      spram.input('WREN').srcConnection! <= stb & we;
-      spram.input('MASKWREN').srcConnection! <= Const(0xF, width: 4);
+    final bytesPerWord = dataWidth ~/ 8;
+    final numWords = size ~/ bytesPerWord;
+    final widthSprams = (dataWidth + spramWidth - 1) ~/ spramWidth;
+    final depthSprams = (numWords + spramDepth - 1) ~/ spramDepth;
+    final totalSprams = widthSprams * depthSprams;
 
-      datOut <= spram.output('DATAOUT').getRange(0, dataWidth);
-
-      Sequential(clk, [
-        ack < Const(0),
-        If(stb & ~ack, then: [ack < Const(1)]),
-      ]);
-    } else {
-      _buildSimModel(
-        clk,
-        wordAddr,
-        datIn,
-        datOut,
-        stb,
-        we,
-        ack,
-        size ~/ (dataWidth ~/ 8),
+    if (totalSprams > 4) {
+      throw ArgumentError(
+        'HarborSram "$name": $size bytes at $dataWidth-bit needs $totalSprams '
+        'iCE40 SPRAM blocks, but up5k has only 4 (128KB max on-chip). '
+        'Use external memory (SPI flash / DRAM) for regions this large.',
       );
     }
+
+    final depthAddrBits = depthSprams > 1 ? (depthSprams - 1).bitLength : 0;
+    final bankSelect = depthAddrBits > 0
+        ? wordAddr.getRange(spramAddrBits, spramAddrBits + depthAddrBits)
+        : null;
+    final localAddr = wordAddr.width >= spramAddrBits
+        ? wordAddr.getRange(0, spramAddrBits)
+        : wordAddr.zeroExtend(spramAddrBits);
+
+    final bankOutputs = <Logic>[];
+    for (var d = 0; d < depthSprams; d++) {
+      final bankEnable = bankSelect != null
+          ? bankSelect.eq(Const(d, width: depthAddrBits))
+          : Const(1);
+
+      final sliceOutputs = <Logic>[];
+      for (var w = 0; w < widthSprams; w++) {
+        final bitLo = w * spramWidth;
+        final bitHi = (bitLo + spramWidth) > dataWidth
+            ? dataWidth
+            : bitLo + spramWidth;
+        final sliceWidth = bitHi - bitLo;
+
+        final spram = Ice40SbSpram256ka(name: 'spram_${d}_$w');
+        addSubModule(spram);
+
+        spram.input('CLOCK').srcConnection! <= clk;
+        spram.input('CHIPSELECT').srcConnection! <= bankEnable;
+        spram.input('STANDBY').srcConnection! <= Const(0);
+        spram.input('SLEEP').srcConnection! <= Const(0);
+        spram.input('POWEROFF').srcConnection! <= Const(1);
+        spram.input('ADDRESS').srcConnection! <= localAddr;
+        spram.input('DATAIN').srcConnection! <=
+            datIn.getRange(bitLo, bitHi).zeroExtend(spramWidth);
+        spram.input('WREN').srcConnection! <= stb & we & bankEnable;
+        spram.input('MASKWREN').srcConnection! <= Const(0xF, width: 4);
+
+        sliceOutputs.add(spram.output('DATAOUT').getRange(0, sliceWidth));
+      }
+
+      final bankData = sliceOutputs.length == 1
+          ? sliceOutputs.first.zeroExtend(dataWidth)
+          : sliceOutputs.rswizzle().getRange(0, dataWidth);
+      bankOutputs.add(bankData);
+    }
+
+    if (depthSprams == 1) {
+      datOut <= bankOutputs.first;
+    } else {
+      Logic readMux = bankOutputs.first;
+      for (var d = 1; d < depthSprams; d++) {
+        readMux = mux(
+          bankSelect!.eq(Const(d, width: depthAddrBits)),
+          bankOutputs[d],
+          readMux,
+        );
+      }
+      datOut <= readMux;
+    }
+
+    Sequential(clk, [
+      ack < Const(0),
+      If(stb & ~ack, then: [ack < Const(1)]),
+    ]);
   }
 
   void _buildWithAsicSram(

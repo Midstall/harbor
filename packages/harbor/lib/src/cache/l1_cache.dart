@@ -93,13 +93,6 @@ class HarborL1ICache extends BridgeModule {
     final clk = input('clk');
     final reset = input('reset');
 
-    // Cache geometry
-    // Cache geometry constants for tag/index/offset extraction
-    // final offsetBits = _log2(config.lineSize);
-    // final indexBits = _log2(config.sets);
-    // final tag = reqAddr.getRange(offsetBits + indexBits, 32);
-    // final index = reqAddr.getRange(offsetBits, offsetBits + indexBits);
-
     // FSM states
     final idle = Logic(name: 'idle');
     final refilling = Logic(name: 'refilling');

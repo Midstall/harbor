@@ -96,7 +96,12 @@ class RiscVIsaConfig {
     final funct7 = (instruction >> 25) & 0x7F;
 
     for (final ext in extensions) {
-      final op = ext.findOperation(opcode, funct3: funct3, funct7: funct7);
+      final op = ext.findOperation(
+        opcode,
+        funct3: funct3,
+        funct7: funct7,
+        instruction: instruction,
+      );
       if (op != null && op.isValidFor(mxlen)) return op;
     }
     return null;

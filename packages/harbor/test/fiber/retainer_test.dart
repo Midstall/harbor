@@ -27,7 +27,7 @@ void main() {
 
       h1.release();
       h2.release();
-      // Not done yet — h3 still held
+      // Not done yet, h3 still held
       h3.release();
 
       await r.wait;

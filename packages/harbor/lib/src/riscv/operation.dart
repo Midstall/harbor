@@ -1,4 +1,5 @@
 import '../encoding/bit_struct.dart';
+import '../encoding/rvc_immediate.dart';
 import 'micro_op.dart';
 import 'mxlen.dart';
 import 'resource.dart';
@@ -82,6 +83,31 @@ class RiscVOperation {
   /// `null` means any privilege level.
   final int? privilegeLevel;
 
+  /// For compressed instructions: how to descramble this instruction's
+  /// immediate. `null` for non-compressed (immediate comes from [format]'s
+  /// contiguous fields) or operations with no immediate.
+  final RvcImm? immKind;
+
+  /// Extra fixed-bit discriminator on the raw instruction word, for
+  /// disambiguating encodings that share opcode/funct (e.g. c.mv vs c.add
+  /// differ only in bit 12). When set, `(instruction & matchMask) ==
+  /// matchValue` must hold.
+  final int? matchMask;
+  final int? matchValue;
+
+  /// A group of raw instruction bits that must be non-zero (e.g. rs2 != 0 for
+  /// c.add/c.mv) or zero (e.g. rs2 == 0 for c.jr).
+  final int? nonZeroMask;
+  final int? zeroMask;
+
+  /// Forces a register operand to a fixed index regardless of the encoding,
+  /// for instructions with implicit registers (e.g. c.jal/c.jalr link to x1;
+  /// c.lwsp/c.swsp/c.addi16sp/c.addi4spn use x2/sp as the base). Applied at
+  /// decode after the format-derived register fields.
+  final int? fixedRd;
+  final int? fixedRs1;
+  final int? fixedRs2;
+
   const RiscVOperation({
     required this.mnemonic,
     required this.opcode,
@@ -94,7 +120,27 @@ class RiscVOperation {
     this.executionMode = RiscVExecutionMode.microcoded,
     this.xlenConstraint,
     this.privilegeLevel,
+    this.immKind,
+    this.matchMask,
+    this.matchValue,
+    this.nonZeroMask,
+    this.zeroMask,
+    this.fixedRd,
+    this.fixedRs1,
+    this.fixedRs2,
   });
+
+  /// Whether [instruction] satisfies this op's raw-bit discriminators
+  /// ([matchMask]/[matchValue], [nonZeroMask], [zeroMask]). Ops with no
+  /// discriminators always pass.
+  bool matchesRaw(int instruction) {
+    if (matchMask != null && (instruction & matchMask!) != (matchValue ?? 0)) {
+      return false;
+    }
+    if (nonZeroMask != null && (instruction & nonZeroMask!) == 0) return false;
+    if (zeroMask != null && (instruction & zeroMask!) != 0) return false;
+    return true;
+  }
 
   /// Whether this instruction is valid for the given [mxlen].
   bool isValidFor(RiscVMxlen mxlen) =>

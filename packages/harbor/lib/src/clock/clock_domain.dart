@@ -274,6 +274,19 @@ class HarborClockGenerator {
       );
     }
 
+    // No frequency change: pass the source clock through directly. A 1:1 PLL
+    // is pointless, costs a hard PLL block, and on iCE40 conflicts with placing
+    // the clock-input pad.
+    if (config.frequency == sourceFreq) {
+      final domain = HarborClockDomain(
+        config: config,
+        clk: inputClk,
+        reset: inputReset,
+      );
+      _domains.add(domain);
+      return domain;
+    }
+
     final t = target;
     if (t == null) {
       // No target - just pass through (simulation mode)

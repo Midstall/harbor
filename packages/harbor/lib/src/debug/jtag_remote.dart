@@ -50,6 +50,10 @@ class JtagRemote {
   Socket? _client;
   bool _running = false;
 
+  /// The actual bound port (useful when constructed with `port: 0` to let the
+  /// OS pick one). Null until [start] has bound the socket.
+  int? get boundPort => _server?.port;
+
   /// Default OpenOCD remote bitbang port.
   static const defaultPort = 44853;
 
@@ -73,28 +77,41 @@ class JtagRemote {
     print('JTAG remote bitbang server listening on port $port');
     print('Connect with: remote_bitbang_port $port');
 
-    await for (final client in _server!) {
-      if (!_running) break;
-
+    // Accept connections concurrently so a new one can SUPERSEDE the current
+    // client. OpenOCD reconnects (e.g. a Heimdall daemon restart spawns a fresh
+    // transport) while the previous socket may still be half-open. Tearing the
+    // old one down ends its handler and closes its socket. Without this an
+    // orphaned/half-closed peer lingers in CLOSE-WAIT and spins the event loop
+    // (pegging a core driving the simulator from a dead connection).
+    _server!.listen((client) {
+      if (!_running) {
+        client.destroy();
+        return;
+      }
+      final previous = _client;
       _client = client;
       client.setOption(SocketOption.tcpNoDelay, true);
       print('JTAG remote bitbang: client connected');
+      previous?.destroy();
+      unawaited(_serve(client));
+    });
+  }
 
-      // A write to the socket (the 'R' TDO response) is buffered and flushed
-      // asynchronously. If the peer (OpenOCD) closes the connection while a
-      // write is in flight, the failure surfaces on the sink's `done` future
-      // rather than at the `add` call site, so it escapes the try/catch below
-      // and would otherwise crash the whole simulation. Swallow it here and
-      // treat it as a normal disconnect.
-      unawaited(client.done.catchError((Object _) => client));
-
-      try {
-        await _handleClient(client);
-      } catch (e) {
-        if (_running) print('JTAG remote bitbang error: $e');
-      }
-
-      _client = null;
+  Future<void> _serve(Socket client) async {
+    // A write to the socket (the 'R' TDO response) is buffered and flushed
+    // asynchronously. If the peer (OpenOCD) closes the connection while a write
+    // is in flight, the failure surfaces on the sink's `done` future rather
+    // than at the `add` call site, so swallow it and treat it as a disconnect.
+    unawaited(client.done.catchError((Object _) => client));
+    try {
+      await _handleClient(client);
+    } catch (e) {
+      if (_running) print('JTAG remote bitbang error: $e');
+    } finally {
+      // Always fully close: a socket left open lingers in CLOSE-WAIT and, across
+      // reconnects, those accumulate and spin the event loop.
+      client.destroy();
+      if (identical(_client, client)) _client = null;
       print('JTAG remote bitbang: client disconnected');
     }
   }
@@ -110,9 +127,12 @@ class JtagRemote {
 
   Future<void> _handleClient(Socket client) async {
     await for (final data in client) {
-      if (!_running) break;
+      // Stop if shutting down or this client was superseded by a newer
+      // connection, so a stale handler never drives the simulator.
+      if (!_running || !identical(_client, client)) break;
 
       for (final byte in data) {
+        if (!identical(_client, client)) return;
         if (byte >= 0x30 && byte <= 0x37) {
           // '0'-'7': set TCK/TMS/TDI
           final val_ = byte - 0x30;

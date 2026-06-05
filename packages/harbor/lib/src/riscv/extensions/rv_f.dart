@@ -7,6 +7,17 @@ import '../resource.dart';
 const _fp32 = RiscVFloatRegFile(32);
 const _int = RiscVIntRegFile(32);
 
+// Shared resources for the single-precision fused multiply-add ops (3 FP source
+// reads + FP dest). The microcode is inlined per op because the fused funct
+// differs and Harbor's op list is const (no helper calls allowed).
+const _fmaResS = [
+  RfResource(_fp32, rs1),
+  RfResource(_fp32, rs2),
+  RfResource(_fp32, rs3),
+  RfResource(_fp32, rd),
+  FpuResource(),
+];
+
 const rvF = RiscVExtension(
   name: 'F',
   key: 'F',
@@ -75,6 +86,97 @@ const rvF = RiscVExtension(
           RiscVMicroOpField.rs1,
           RiscVMicroOpField.rd,
           b: RiscVMicroOpField.rs2,
+        ),
+        RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.rd),
+        RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
+      ],
+    ),
+    // Fused multiply-add (R4-type, single precision). opcode distinguishes the
+    // four ops; fmt=00 (matchMask on bits[26:25]) selects single. Three FP source
+    // reads (rs1/rs2/rs3) feed the fused op rd = +-(rs1*rs2) +- rs3.
+    RiscVOperation(
+      mnemonic: 'fmadd.s',
+      opcode: 0x43,
+      format: r4Type,
+      matchMask: 0x06000000, // fmt bits[26:25]
+      matchValue: 0x00000000, // fmt = 00 (single)
+      resources: _fmaResS,
+      microcode: [
+        RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVReadRegister(RiscVMicroOpField.rs2),
+        RiscVReadRegister(RiscVMicroOpField.rs3),
+        RiscVFpuOp(
+          RiscVFpuFunct.fmadd,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rd,
+          b: RiscVMicroOpField.rs2,
+          c: RiscVMicroOpField.rs3,
+        ),
+        RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.rd),
+        RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
+      ],
+    ),
+    RiscVOperation(
+      mnemonic: 'fmsub.s',
+      opcode: 0x47,
+      format: r4Type,
+      matchMask: 0x06000000,
+      matchValue: 0x00000000,
+      resources: _fmaResS,
+      microcode: [
+        RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVReadRegister(RiscVMicroOpField.rs2),
+        RiscVReadRegister(RiscVMicroOpField.rs3),
+        RiscVFpuOp(
+          RiscVFpuFunct.fmsub,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rd,
+          b: RiscVMicroOpField.rs2,
+          c: RiscVMicroOpField.rs3,
+        ),
+        RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.rd),
+        RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
+      ],
+    ),
+    RiscVOperation(
+      mnemonic: 'fnmsub.s',
+      opcode: 0x4B,
+      format: r4Type,
+      matchMask: 0x06000000,
+      matchValue: 0x00000000,
+      resources: _fmaResS,
+      microcode: [
+        RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVReadRegister(RiscVMicroOpField.rs2),
+        RiscVReadRegister(RiscVMicroOpField.rs3),
+        RiscVFpuOp(
+          RiscVFpuFunct.fnmsub,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rd,
+          b: RiscVMicroOpField.rs2,
+          c: RiscVMicroOpField.rs3,
+        ),
+        RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.rd),
+        RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
+      ],
+    ),
+    RiscVOperation(
+      mnemonic: 'fnmadd.s',
+      opcode: 0x4F,
+      format: r4Type,
+      matchMask: 0x06000000,
+      matchValue: 0x00000000,
+      resources: _fmaResS,
+      microcode: [
+        RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVReadRegister(RiscVMicroOpField.rs2),
+        RiscVReadRegister(RiscVMicroOpField.rs3),
+        RiscVFpuOp(
+          RiscVFpuFunct.fnmadd,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rd,
+          b: RiscVMicroOpField.rs2,
+          c: RiscVMicroOpField.rs3,
         ),
         RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.rd),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),

@@ -179,11 +179,16 @@ const rvH = RiscVExtension(
     ),
 
     // Privilege instructions
+    // sret/wfi share funct7=0x08; disambiguate on rs2 (bits[24:20]) - see the
+    // matching fix in rv_priv.dart. Without it wfi decoded as sret.
     RiscVOperation(
       mnemonic: 'sret',
       opcode: RiscvOpcode.system,
       funct7: 0x08,
+      funct3: 0,
       format: rType,
+      matchMask: 0x01F00000, // bits[24:20] = rs2
+      matchValue: 0x00200000, // rs2 = 0b00010
       privilegeLevel: 1,
       microcode: [RiscVReturnOp(1)],
     ),
@@ -191,6 +196,7 @@ const rvH = RiscVExtension(
       mnemonic: 'mret',
       opcode: RiscvOpcode.system,
       funct7: 0x18,
+      funct3: 0,
       format: rType,
       privilegeLevel: 3,
       microcode: [RiscVReturnOp(3)],
@@ -199,7 +205,10 @@ const rvH = RiscVExtension(
       mnemonic: 'wfi',
       opcode: RiscvOpcode.system,
       funct7: 0x08,
+      funct3: 0,
       format: rType,
+      matchMask: 0x01F00000, // bits[24:20] = rs2
+      matchValue: 0x00500000, // rs2 = 0b00101
       privilegeLevel: 1,
       microcode: [
         RiscVWaitForInterrupt(),

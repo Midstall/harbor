@@ -17,6 +17,20 @@ const rType = HarborBitStruct({
   'funct7': HarborBitRange(25, 31),
 }, name: 'RType');
 
+/// R4-type: fused multiply-add (fmadd/fmsub/fnmsub/fnmadd). Three FP source
+/// registers plus a 2-bit fmt selecting precision.
+///
+/// `[rs3(31:27)][fmt(26:25)][rs2(24:20)][rs1(19:15)][rm(14:12)][rd(11:7)][opcode(6:0)]`
+const r4Type = HarborBitStruct({
+  'opcode': HarborBitRange(0, 6),
+  'rd': HarborBitRange(7, 11),
+  'funct3': HarborBitRange(12, 14), // rm (rounding mode)
+  'rs1': HarborBitRange(15, 19),
+  'rs2': HarborBitRange(20, 24),
+  'funct2': HarborBitRange(25, 26), // fmt: 00=s, 01=d
+  'rs3': HarborBitRange(27, 31),
+}, name: 'R4Type');
+
 /// I-type: immediate operations, loads, JALR.
 ///
 /// `[imm(31:20)][rs1(19:15)][funct3(14:12)][rd(11:7)][opcode(6:0)]`

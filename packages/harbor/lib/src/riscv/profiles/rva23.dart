@@ -71,9 +71,11 @@ final rva23s64 = RiscVIsaConfig(
     // TLB management
     rvSvinval,
     // Virtual memory
-    rvSvbare, rvSvade, rvSvnapot, rvSvpbmt,
+    rvSvbare, rvSvade, rvSvadu, rvSvnapot, rvSvpbmt,
     // Supervisor features
     rvSstc, rvSscofpmf,
+    // State-enable CSRs
+    rvSmstateen, rvSsstateen,
   ],
   hasSupervisor: true,
   hasUser: true,

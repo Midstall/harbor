@@ -105,6 +105,7 @@ enum RiscVAluFunct {
   czeroNez,
   // Zcb unary helpers
   zextb,
+  zextw,
   notOp,
 }
 
@@ -124,7 +125,8 @@ enum RiscVMemSize {
 }
 
 /// Atomic memory operation functions.
-enum RiscVAtomicFunct { add, swap, xor_, and_, or_, min, max, minu, maxu }
+// `cas` is Zacas (amocas.w/.d): compare mem against rd; if equal store rs2; rd<-mem.
+enum RiscVAtomicFunct { add, swap, xor_, and_, or_, min, max, minu, maxu, cas }
 
 /// Floating-point rounding modes.
 enum RiscVFpRoundingMode {
@@ -375,12 +377,20 @@ enum RiscVFpuFunct {
   fsgnjx,
   fmin,
   fmax,
+  // Fused multiply-add (R4-type): rd = +-(a*b) +- c. The sign of the product and
+  // of the addend distinguish the four ops.
+  fmadd, // +(a*b)+c
+  fmsub, // +(a*b)-c
+  fnmsub, // -(a*b)+c
+  fnmadd, // -(a*b)-c
 }
 
 class RiscVFpuOp extends RiscVMicroOp {
   final RiscVFpuFunct funct;
   final RiscVMicroOpField a;
   final RiscVMicroOpField? b;
+  // Third source operand (rs3), used only by the fused multiply-add ops.
+  final RiscVMicroOpField? c;
   final RiscVMicroOpField dest;
   final bool doublePrecision;
 
@@ -389,6 +399,7 @@ class RiscVFpuOp extends RiscVMicroOp {
     this.a,
     this.dest, {
     this.b,
+    this.c,
     this.doublePrecision = false,
   });
 }

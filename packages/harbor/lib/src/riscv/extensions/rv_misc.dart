@@ -131,6 +131,12 @@ const rvZkt = RiscVExtension(name: 'Zkt', key: null, misaBit: null);
 /// Zvfhmin - Vector minimal half-precision floating-point.
 const rvZvfhmin = RiscVExtension(name: 'Zvfhmin', key: null, misaBit: null);
 
+/// Zvfh - Vector half-precision floating-point (SEW=16 FP arithmetic). A marker
+/// extension: the OP-FP-V ops (vfadd.vv etc.) are SEW-generic and decode the same
+/// for any SEW, so the half-precision capability is signalled by including this
+/// in the ISA config rather than by distinct operations.
+const rvZvfh = RiscVExtension(name: 'Zvfh', key: null, misaBit: null);
+
 /// Zvbb - Vector basic bit-manipulation instructions.
 const rvZvbb = RiscVExtension(name: 'Zvbb', key: null, misaBit: null);
 
@@ -266,6 +272,7 @@ final rvZcb = RiscVExtension(
           RiscVMemSize.byte1,
           unsigned: true,
         ),
+        RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.rd),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
       ],
     ),
@@ -290,6 +297,7 @@ final rvZcb = RiscVExtension(
           RiscVMemSize.half,
           unsigned: true,
         ),
+        RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.rd),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
       ],
     ),
@@ -313,6 +321,7 @@ final rvZcb = RiscVExtension(
           RiscVMicroOpField.rd,
           RiscVMemSize.half,
         ),
+        RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.rd),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
       ],
     ),
@@ -441,6 +450,25 @@ final rvZcb = RiscVExtension(
       ],
     ),
     RiscVOperation(
+      mnemonic: 'c.zext.w',
+      opcode: CompressedOp.c1,
+      funct3: C1Funct3.cMisc,
+      format: caType,
+      matchMask: 0x1F << 2,
+      matchValue: 0x1C << 2,
+      resources: [RfResource(_int, rs1), RfResource(_int, rd)],
+      microcode: [
+        RiscVReadRegister(RiscVMicroOpField.rs1),
+        RiscVAlu(
+          RiscVAluFunct.zextw,
+          RiscVMicroOpField.rs1,
+          RiscVMicroOpField.rs1,
+        ),
+        RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.alu),
+        RiscVUpdatePc(RiscVMicroOpField.pc, offset: 2),
+      ],
+    ),
+    RiscVOperation(
       mnemonic: 'c.not',
       opcode: CompressedOp.c1,
       funct3: C1Funct3.cMisc,
@@ -464,6 +492,11 @@ final rvZcb = RiscVExtension(
       opcode: CompressedOp.c1,
       funct3: C1Funct3.cMisc,
       format: caType,
+      // funct2 = bits[6:5] = 0b10 distinguishes c.mul from the cMisc unary ops
+      // (which all have bits[6:5] = 0b11). Without this matchMask c.mul matches
+      // every cMisc op and shadows the unary extends in the decoder.
+      matchMask: 0x3 << 5,
+      matchValue: 0x2 << 5,
       resources: [
         RfResource(_int, rs1),
         RfResource(_int, rs2),
@@ -663,6 +696,18 @@ const rvSvbare = RiscVExtension(name: 'Svbare', key: null, misaBit: null);
 
 /// Svade - A/D bit page-fault exceptions.
 const rvSvade = RiscVExtension(name: 'Svade', key: null, misaBit: null);
+
+/// Svadu - hardware updating of page-table A/D bits (the alternative to Svade,
+/// which faults instead). The MMU sets Accessed/Dirty during a successful walk.
+const rvSvadu = RiscVExtension(name: 'Svadu', key: null, misaBit: null);
+
+/// Smstateen - machine-level state-enable CSRs (mstateen0-3[h]) gating access to
+/// extension state from lower privilege levels.
+const rvSmstateen = RiscVExtension(name: 'Smstateen', key: null, misaBit: null);
+
+/// Ssstateen - the supervisor-visible view of the state-enable CSRs
+/// (sstateen0-3); requires [rvSmstateen].
+const rvSsstateen = RiscVExtension(name: 'Ssstateen', key: null, misaBit: null);
 
 /// Ziccif - Instruction fetch atomicity in coherent cacheable regions.
 const rvZiccif = RiscVExtension(name: 'Ziccif', key: null, misaBit: null);

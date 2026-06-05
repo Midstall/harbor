@@ -165,9 +165,7 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     return buf.toString();
   }
 
-  /// Generates a nextpnr command for place-and-route (iCE40/ECP5).
-  ///
-  /// Returns null for Vivado targets (which use their own flow).
+  /// Maps an ECP5 device part to its nextpnr size suffix (e.g. `45k`).
   static String _ecp5DeviceSize(String device) {
     final lower = device.toLowerCase();
     if (lower.contains('12')) return '12k';
@@ -177,6 +175,9 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     return device;
   }
 
+  /// Generates a nextpnr command for place-and-route (iCE40/ECP5).
+  ///
+  /// Returns null for Vivado targets (which use their own flow).
   String? generateNextpnrCommand(String topCell) {
     switch (vendor) {
       case HarborFpgaVendor.ice40:
@@ -358,6 +359,14 @@ class HarborAsicMacro {
 /// - **Hierarchical**: specified modules are hardened as macros first,
 ///   then assembled into the top-level chip (like Aegis tile flow)
 ///
+/// The emitted synth/PnR TCL is driven by `asix.mkTapeout`: PDK paths and
+/// floorplan knobs are read from environment variables (LIB_FILE, TECH_LEF,
+/// CELL_LEF_DIR, SYNTH_V, SDC_FILE, SITE_NAME, UTILIZATION, etc.) rather than
+/// baked into the script, and RTL is read relative to the script via
+/// `[info script]`. Cell *names* (tie/fill/clock-buffer) stay baked from the
+/// [PdkProvider]. Knobs that asix also owns ([utilization], [frequency]) act as
+/// defaults only: asix's matching args take precedence at build time.
+///
 /// ```dart
 /// final target = HarborAsicTarget(
 ///   provider: Sky130Provider(pdkRoot: '/path/to/sky130A'),
@@ -380,9 +389,17 @@ class HarborAsicTarget extends HarborDeviceTarget {
   final String topCell;
 
   /// Target clock frequency in Hz.
+  ///
+  /// Drives [generateSdc] for standalone/FPGA use. Under `asix.mkTapeout` the
+  /// constraints come from asix's own `clockPeriodNs` (it generates its own
+  /// `constraints.sdc` and points `SDC_FILE` at it), so keep the two in sync.
   final int frequency;
 
   /// Utilization target for placement (0.0 to 1.0).
+  ///
+  /// Advisory under `asix.mkTapeout`: the PnR script reads `UTILIZATION` from
+  /// the env (asix's `coreUtilization`), so this value is the default rather
+  /// than the build-time effective one.
   final double utilization;
 
   /// Modules to harden as macros before top-level assembly.
@@ -423,6 +440,10 @@ class HarborAsicTarget extends HarborDeviceTarget {
   bool get isHierarchical => macros.isNotEmpty;
 
   /// Generates an SDC timing constraints file.
+  ///
+  /// Used by the FPGA/standalone flows. `asix.mkTapeout` ignores this and
+  /// generates its own `constraints.sdc` from `clockPeriodNs`, pointing the
+  /// PnR script's `SDC_FILE` env var at it.
   String generateSdc() {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated SDC for $name');
@@ -447,20 +468,30 @@ class HarborAsicTarget extends HarborDeviceTarget {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated Yosys synthesis for $topCell');
     buf.writeln('# PDK: ${provider.name}');
+    buf.writeln(
+      '# Run by asix.mkTapeout (yosys -c). The standard-cell liberty',
+    );
+    buf.writeln(
+      '# comes from \$::env(LIB_FILE); RTL/stubs are read relative to',
+    );
+    buf.writeln(
+      '# this script via [info script] so the flow is location-agnostic.',
+    );
     if (isHierarchical) {
       buf.writeln('# Mode: hierarchical (${macros.length} macros)');
     }
     buf.writeln();
-    buf.writeln('read_verilog -sv rtl/*.sv');
+    buf.writeln('set ipdir [file dirname [info script]]');
+    buf.writeln('read_verilog -sv \$ipdir/rtl/*.sv');
 
     // Read blackbox stubs for hard macros (SRAM, etc.)
-    buf.writeln('read_verilog -lib blackboxes.v');
+    buf.writeln('read_verilog -lib \$ipdir/blackboxes.v');
 
     // In hierarchical mode, replace macros with blackbox stubs
     if (isHierarchical) {
       buf.writeln();
       buf.writeln('# Replace hardened macros with blackbox stubs');
-      buf.writeln('read_verilog \$STUBS_V');
+      buf.writeln('read_verilog \$::env(STUBS_V)');
       for (final macro in macros) {
         buf.writeln('blackbox ${macro.moduleName}');
       }
@@ -469,15 +500,15 @@ class HarborAsicTarget extends HarborDeviceTarget {
 
     buf.writeln('hierarchy -top $topCell -keep_portwidths');
     buf.writeln('synth -top $topCell');
-    buf.writeln('dfflibmap -liberty ${lib.libertyPath}');
-    buf.writeln('abc -liberty ${lib.libertyPath}');
+    buf.writeln('dfflibmap -liberty \$::env(LIB_FILE)');
+    buf.writeln('abc -liberty \$::env(LIB_FILE)');
     buf.writeln(
       'hilomap -hicell ${lib.tieHighCell} Z '
       '-locell ${lib.tieLowCell} ZN',
     );
     buf.writeln('opt_clean -purge');
     buf.writeln('write_verilog -noattr ${topCell}_synth.v');
-    buf.writeln('stat -liberty ${lib.libertyPath}');
+    buf.writeln('stat -liberty \$::env(LIB_FILE)');
     return buf.toString();
   }
 
@@ -491,19 +522,27 @@ class HarborAsicTarget extends HarborDeviceTarget {
       '# Auto-generated Yosys synthesis for macro: ${macro.moduleName}',
     );
     buf.writeln('# PDK: ${provider.name}');
+    buf.writeln(
+      '# Run by asix.mkTapeout (yosys -c); liberty from \$::env(LIB_FILE),',
+    );
+    buf.writeln(
+      '# RTL read relative to this script. Macro scripts live in the',
+    );
+    buf.writeln('# ip macros/ subdir, so rtl/ is one level up from here.');
     buf.writeln();
-    buf.writeln('read_verilog -sv rtl/*.sv');
+    buf.writeln('set iproot [file dirname [file dirname [info script]]]');
+    buf.writeln('read_verilog -sv \$iproot/rtl/*.sv');
     buf.writeln('hierarchy -top ${macro.moduleName}');
     buf.writeln('synth -top ${macro.moduleName} -flatten');
-    buf.writeln('dfflibmap -liberty ${lib.libertyPath}');
-    buf.writeln('abc -liberty ${lib.libertyPath}');
+    buf.writeln('dfflibmap -liberty \$::env(LIB_FILE)');
+    buf.writeln('abc -liberty \$::env(LIB_FILE)');
     buf.writeln(
       'hilomap -hicell ${lib.tieHighCell} Z '
       '-locell ${lib.tieLowCell} ZN',
     );
     buf.writeln('opt_clean -purge');
     buf.writeln('write_verilog -noattr ${macro.moduleName}_synth.v');
-    buf.writeln('stat -liberty ${lib.libertyPath}');
+    buf.writeln('stat -liberty \$::env(LIB_FILE)');
     return buf.toString();
   }
 
@@ -519,24 +558,42 @@ class HarborAsicTarget extends HarborDeviceTarget {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated OpenROAD macro hardening for $m');
     buf.writeln('# PDK: ${provider.name}');
+    buf.writeln(
+      '# Run by asix.mkTapeout (openroad -exit). Liberty/LEF come from',
+    );
+    buf.writeln(
+      '# the env (LIB_FILE/TECH_LEF/CELL_LEF_DIR); utilization is the',
+    );
+    buf.writeln(
+      '# per-tile TILE_UTIL. asix provides no macro SDC, so timing is',
+    );
+    buf.writeln('# left unconstrained at the tile level.');
     buf.writeln();
 
-    // Read inputs
-    buf.writeln('read_liberty ${lib.libertyPath}');
-    if (lib.techLefPath != null) {
-      buf.writeln('read_lef ${lib.techLefPath}');
-    }
-    buf.writeln('read_lef ${lib.lefPath}');
+    // Read inputs (paths supplied by asix via env vars)
+    buf.writeln('read_liberty \$::env(LIB_FILE)');
+    buf.writeln(
+      'if {[info exists ::env(TECH_LEF)] && \$::env(TECH_LEF) ne ""} {',
+    );
+    buf.writeln('    read_lef \$::env(TECH_LEF)');
+    buf.writeln('}');
+    buf.writeln(
+      'foreach _lef [lsort [glob -nocomplain \$::env(CELL_LEF_DIR)/*.lef]] {',
+    );
+    buf.writeln(
+      '    if {[string match *tech* [file tail \$_lef]]} { continue }',
+    );
+    buf.writeln('    read_lef \$_lef');
+    buf.writeln('}');
     buf.writeln('read_verilog ${m}_synth.v');
     buf.writeln('link_design $m');
-    buf.writeln('read_sdc ${topCell}.sdc');
     buf.writeln();
 
     // Floorplan
     buf.writeln('initialize_floorplan \\');
-    buf.writeln('    -utilization ${macro.utilization} \\');
+    buf.writeln('    -utilization \$::env(TILE_UTIL) \\');
     buf.writeln('    -core_space 2 \\');
-    buf.writeln('    -site ${lib.siteName}');
+    buf.writeln('    -site \$::env(SITE_NAME)');
     buf.writeln();
 
     // Pin placement on all edges for grid connectivity
@@ -553,7 +610,7 @@ class HarborAsicTarget extends HarborDeviceTarget {
     buf.writeln();
 
     // Placement
-    buf.writeln('global_placement -density ${macro.utilization}');
+    buf.writeln('global_placement -density \$::env(TILE_UTIL)');
     buf.writeln('detailed_placement');
     buf.writeln();
 
@@ -601,6 +658,12 @@ class HarborAsicTarget extends HarborDeviceTarget {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated OpenROAD P&R for $topCell');
     buf.writeln('# PDK: ${provider.name}');
+    buf.writeln('# Run by asix.mkTapeout (openroad -exit). All PDK paths and');
+    buf.writeln('# floorplan knobs come from the env: LIB_FILE/TECH_LEF/');
+    buf.writeln('# CELL_LEF_DIR/SYNTH_V/SDC_FILE/SITE_NAME/UTILIZATION/');
+    buf.writeln(
+      '# MACRO_HALO/PLACEMENT_DENSITY/DROUTE_END_ITER (+optional DIE_AREA).',
+    );
     if (isHierarchical) {
       buf.writeln(
         '# Mode: hierarchical assembly '
@@ -609,14 +672,25 @@ class HarborAsicTarget extends HarborDeviceTarget {
     }
     buf.writeln();
 
-    // Read inputs
-    buf.writeln('read_liberty ${lib.libertyPath}');
-    if (lib.techLefPath != null) {
-      buf.writeln('read_lef ${lib.techLefPath}');
-    }
-    buf.writeln('read_lef ${lib.lefPath}');
+    // Read inputs (paths supplied by asix via env vars). The tech LEF is read
+    // explicitly, then every other cell LEF is globbed from CELL_LEF_DIR while
+    // skipping anything that looks like the tech LEF (avoids a double read).
+    buf.writeln('read_liberty \$::env(LIB_FILE)');
+    buf.writeln(
+      'if {[info exists ::env(TECH_LEF)] && \$::env(TECH_LEF) ne ""} {',
+    );
+    buf.writeln('    read_lef \$::env(TECH_LEF)');
+    buf.writeln('}');
+    buf.writeln(
+      'foreach _lef [lsort [glob -nocomplain \$::env(CELL_LEF_DIR)/*.lef]] {',
+    );
+    buf.writeln(
+      '    if {[string match *tech* [file tail \$_lef]]} { continue }',
+    );
+    buf.writeln('    read_lef \$_lef');
+    buf.writeln('}');
 
-    // Read macro LEF/LIB in hierarchical mode
+    // Read macro LEF/LIB in hierarchical mode (asix copies these into the CWD)
     if (isHierarchical) {
       buf.writeln();
       buf.writeln('# Read hardened macro abstracts');
@@ -627,25 +701,38 @@ class HarborAsicTarget extends HarborDeviceTarget {
     }
 
     buf.writeln();
-    buf.writeln('read_verilog ${topCell}_synth.v');
+    buf.writeln('read_verilog \$::env(SYNTH_V)');
     buf.writeln('link_design $topCell');
-    buf.writeln('read_sdc ${topCell}.sdc');
+    buf.writeln('read_sdc \$::env(SDC_FILE)');
     buf.writeln();
 
-    // Floorplan
-    buf.writeln('initialize_floorplan \\');
-    buf.writeln('    -utilization $utilization \\');
-    buf.writeln('    -core_space ${dieMarginUm.toStringAsFixed(0)} \\');
-    buf.writeln('    -site ${lib.siteName}');
+    // Floorplan: a fixed DIE_AREA (fab-slot tapeouts) takes precedence over a
+    // utilization-driven auto floorplan. The core is inset from the die by the
+    // die margin on every side.
+    buf.writeln('if {[info exists ::env(DIE_AREA)]} {');
+    buf.writeln('    lassign \$::env(DIE_AREA) _dx0 _dy0 _dx1 _dy1');
+    buf.writeln('    set _m ${dieMarginUm.toStringAsFixed(0)}');
+    buf.writeln('    initialize_floorplan \\');
+    buf.writeln('        -die_area "\$_dx0 \$_dy0 \$_dx1 \$_dy1" \\');
+    buf.writeln(
+      '        -core_area "[expr {\$_dx0 + \$_m}] [expr {\$_dy0 + \$_m}] [expr {\$_dx1 - \$_m}] [expr {\$_dy1 - \$_m}]" \\',
+    );
+    buf.writeln('        -site \$::env(SITE_NAME)');
+    buf.writeln('} else {');
+    buf.writeln('    initialize_floorplan \\');
+    buf.writeln('        -utilization \$::env(UTILIZATION) \\');
+    buf.writeln('        -core_space ${dieMarginUm.toStringAsFixed(0)} \\');
+    buf.writeln('        -site \$::env(SITE_NAME)');
+    buf.writeln('}');
     buf.writeln();
 
-    // Macro placement with halos
+    // Macro placement with halos (halo width supplied by asix as MACRO_HALO)
     if (isHierarchical) {
       buf.writeln('# Macro placement with halos');
       for (final macro in macros) {
         buf.writeln(
-          'set_macro_halo -halo_x ${macro.haloUm} '
-          '-halo_y ${macro.haloUm} '
+          'set_macro_halo -halo_x \$::env(MACRO_HALO) '
+          '-halo_y \$::env(MACRO_HALO) '
           '[get_cells -hierarchical -filter "ref_name == ${macro.moduleName}"]',
         );
       }
@@ -659,8 +746,8 @@ class HarborAsicTarget extends HarborDeviceTarget {
     buf.writeln('global_connect');
     buf.writeln();
 
-    // Placement
-    buf.writeln('global_placement -density $utilization');
+    // Placement (density supplied by asix as PLACEMENT_DENSITY)
+    buf.writeln('global_placement -density \$::env(PLACEMENT_DENSITY)');
     buf.writeln('detailed_placement');
     buf.writeln();
 
@@ -687,7 +774,11 @@ class HarborAsicTarget extends HarborDeviceTarget {
       );
     }
     buf.writeln('global_route -allow_congestion');
-    buf.writeln('detailed_route');
+    buf.writeln('if {[info exists ::env(DROUTE_END_ITER)]} {');
+    buf.writeln('    detailed_route -droute_end_iter \$::env(DROUTE_END_ITER)');
+    buf.writeln('} else {');
+    buf.writeln('    detailed_route');
+    buf.writeln('}');
     buf.writeln();
 
     // Fill

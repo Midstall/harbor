@@ -20,6 +20,11 @@ import '../soc/device_tree.dart';
 /// - 0x7: SCR
 ///
 /// Address space: 8 bytes (mapped to 0x1000 page for SoC).
+///
+/// On a multi-byte bus the registers stay byte-mapped within words: writes
+/// pick their register through the byte-lane selects, and reads return the
+/// whole addressed word with every register in its lane, so masters that
+/// issue word-aligned loads extract the byte they want.
 class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
   final int baseAddress;
   final int clockFrequency;
@@ -57,11 +62,43 @@ class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
 
     final clk = input('clk');
     final reset = input('reset');
-    // Use only the lower 3 bits of address and 8 bits of data
-    final addr = bus.addr.getRange(0, 3);
-    final datIn = bus.dataIn.getRange(0, 8);
-    final datOut8 = Logic(name: 'uart_dat_out', width: 8);
-    bus.dataOut <= datOut8.zeroExtend(bus.dataOut.width);
+    // The bus carries word-aligned addresses with the byte position encoded
+    // in the SEL lanes (ns16550a registers are byte-mapped). Writes decode
+    // the active lane back into a register index and take their data from
+    // that lane. Reads return the whole addressed word with every byte
+    // register in its lane, and the master extracts the byte it asked for.
+    final lanes = bus.dataIn.width ~/ 8;
+    final Logic addr;
+    final Logic datIn;
+    if (lanes == 1) {
+      // Byte-wide bus: addresses are already byte-granular.
+      addr = bus.addr.getRange(0, 3);
+      datIn = bus.dataIn.getRange(0, 8);
+    } else {
+      final laneBits = (lanes - 1).bitLength;
+      final wrLane = Logic(name: 'uart_wr_lane', width: laneBits);
+      Combinational([
+        wrLane < Const(0, width: laneBits),
+        for (var i = 1; i < lanes; i++)
+          If(bus.sel[i], then: [wrLane < Const(i, width: laneBits)]),
+      ]);
+      // Write register index 0..7: the lane within the addressed word, plus
+      // the word-select address bit on a 32-bit bus (a 64-bit bus spans all
+      // 8 registers in one word).
+      addr = laneBits >= 3 ? wrLane : [bus.addr[2], wrLane].swizzle();
+      final laneData = Logic(name: 'uart_dat_in', width: 8);
+      Combinational([
+        laneData < Const(0, width: 8),
+        for (var i = 0; i < lanes; i++)
+          If(
+            wrLane.eq(Const(i, width: laneBits)),
+            then: [laneData < bus.dataIn.getRange(8 * i, 8 * i + 8)],
+          ),
+      ]);
+      datIn = laneData;
+    }
+    final datOutW = Logic(name: 'uart_dat_out', width: bus.dataOut.width);
+    bus.dataOut <= datOutW;
     final ack = bus.ack;
     final stb = bus.stb;
     final we = bus.we;
@@ -82,7 +119,15 @@ class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
     final txHolding = Logic(name: 'tx_holding', width: 8);
     final txHoldingFull = Logic(name: 'tx_holding_full');
 
-    // RX state (single-byte holding register)
+    // RX state (single-byte holding register). The pin is asynchronous, so it
+    // passes through a two-flop synchronizer before the sampler looks at it.
+    final rxIn = input('rx');
+    final rxSyncA = Logic(name: 'rx_sync_a');
+    final rxSyncB = Logic(name: 'rx_sync_b');
+    final rxBusy = Logic(name: 'rx_busy');
+    final rxBits = Logic(name: 'rx_bits', width: 4);
+    final rxBaud = Logic(name: 'rx_baud', width: 16);
+    final rxShift = Logic(name: 'rx_shift', width: 8);
     final rxData = Logic(name: 'rx_data', width: 8);
     final rxReady = Logic(name: 'rx_ready');
 
@@ -125,6 +170,62 @@ class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
 
     final dlab = lcr[7];
 
+    // Read mux. On a multi-byte bus every byte register of the addressed word
+    // is returned in its lane and the master extracts the byte it wants. On a
+    // byte-wide bus each register is returned individually. Reading the word
+    // holding the RBR pops the receive buffer, and with word-grouped reads
+    // that also fires for IIR/LCR reads of the same word, an accepted quirk
+    // of byte registers on a word bus (LSR polling, in the other word, is
+    // unaffected).
+    final List<Conditional> readItems;
+    if (lanes == 1) {
+      readItems = [
+        Case(addr, [
+          CaseItem(Const(0, width: 3), [
+            If(
+              dlab,
+              then: [datOutW < dll],
+              orElse: [datOutW < rxData, rxReady < Const(0)],
+            ),
+          ]),
+          CaseItem(Const(1, width: 3), [
+            If(dlab, then: [datOutW < dlm], orElse: [datOutW < ier]),
+          ]),
+          CaseItem(Const(2, width: 3), [datOutW < computedIir]),
+          CaseItem(Const(3, width: 3), [datOutW < lcr]),
+          CaseItem(Const(4, width: 3), [datOutW < mcr]),
+          CaseItem(Const(5, width: 3), [datOutW < lsr]),
+          CaseItem(Const(6, width: 3), [datOutW < Const(0, width: 8)]),
+          CaseItem(Const(7, width: 3), [datOutW < scr]),
+        ]),
+      ];
+    } else {
+      final word0 = [
+        lcr,
+        computedIir,
+        mux(dlab, dlm, ier),
+        mux(dlab, dll, rxData),
+      ].swizzle();
+      final word1 = [scr, Const(0, width: 8), lsr, mcr].swizzle();
+      if (lanes >= 8) {
+        readItems = [
+          datOutW < [word1, word0].swizzle().zeroExtend(bus.dataOut.width),
+          If(~dlab, then: [rxReady < Const(0)]),
+        ];
+      } else {
+        readItems = [
+          If(
+            bus.addr[2],
+            then: [datOutW < word1.zeroExtend(bus.dataOut.width)],
+            orElse: [
+              datOutW < word0.zeroExtend(bus.dataOut.width),
+              If(~dlab, then: [rxReady < Const(0)]),
+            ],
+          ),
+        ];
+      }
+    }
+
     Sequential(clk, [
       If(
         reset,
@@ -143,9 +244,15 @@ class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
           txHoldingFull < Const(0),
           rxData < Const(0, width: 8),
           rxReady < Const(0),
+          rxSyncA < Const(1), // idle-high line
+          rxSyncB < Const(1),
+          rxBusy < Const(0),
+          rxBits < Const(0, width: 4),
+          rxBaud < Const(0, width: 16),
+          rxShift < Const(0, width: 8),
           baudCount < Const(0, width: 16),
           ack < Const(0),
-          datOut8 < Const(0, width: 8),
+          datOutW < Const(0, width: bus.dataOut.width),
         ],
         orElse: [
           // Baud counter
@@ -168,7 +275,11 @@ class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
             ],
           ),
 
-          // Load from holding register when TX idle
+          // Load from holding register when TX idle. Reloading the baud
+          // counter here phase-aligns the generator to the new frame:
+          // without it the free-running counter truncates the start bit to
+          // whatever remained of the current period, and receivers misframe
+          // the first byte after an idle gap.
           If(
             ~txBusy & txHoldingFull,
             then: [
@@ -177,68 +288,110 @@ class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
               txBusy < Const(1),
               txCount < Const(0, width: 4),
               txHoldingFull < Const(0),
+              baudCount < (divisor - Const(1, width: 16)),
+            ],
+          ),
+
+          // RX engine: hunt for a start bit on the synchronized line, then
+          // sample mid-bit at the divisor rate (8N1, LSB first). The divisor
+          // gate keeps the receiver idle until the UART is configured, the
+          // same rule the transmitter follows.
+          rxSyncA < rxIn,
+          rxSyncB < rxSyncA,
+          If(
+            ~rxBusy,
+            then: [
+              If(
+                ~rxSyncB & divisor.neq(Const(0, width: 16)),
+                then: [
+                  rxBusy < Const(1),
+                  rxBits < Const(0, width: 4),
+                  // Half a bit period, to land mid-start for validation.
+                  rxBaud <
+                      [Const(0, width: 1), divisor.getRange(1, 16)].swizzle(),
+                ],
+              ),
+            ],
+            orElse: [
+              If(
+                rxBaud.eq(Const(0, width: 16)),
+                then: [
+                  rxBaud < (divisor - Const(1, width: 16)),
+                  If(
+                    rxBits.eq(Const(0, width: 4)),
+                    then: [
+                      // Mid-start: still low means a real start bit, else a
+                      // glitch, so re-arm the hunt.
+                      If(
+                        ~rxSyncB,
+                        then: [rxBits < Const(1, width: 4)],
+                        orElse: [rxBusy < Const(0)],
+                      ),
+                    ],
+                    orElse: [
+                      If(
+                        rxBits.lte(Const(8, width: 4)),
+                        then: [
+                          // Data bits 1..8: insert at the top and shift down,
+                          // so the first (LSB-first) bit ends at bit 0.
+                          rxShift < [rxSyncB, rxShift.getRange(1, 8)].swizzle(),
+                          rxBits < (rxBits + Const(1, width: 4)),
+                        ],
+                        orElse: [
+                          // Stop position: a high line frames a valid byte.
+                          If(
+                            rxSyncB,
+                            then: [rxData < rxShift, rxReady < Const(1)],
+                          ),
+                          rxBusy < Const(0),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
+                orElse: [rxBaud < (rxBaud - Const(1, width: 16))],
+              ),
             ],
           ),
 
           // Bus access
           ack < Const(0),
-          datOut8 < Const(0, width: 8),
+          datOutW < Const(0, width: bus.dataOut.width),
 
           If(
             stb & ~ack,
             then: [
               ack < Const(1),
 
-              Case(addr, [
-                // 0x0: RBR/THR/DLL
-                CaseItem(Const(0, width: 3), [
-                  If(
-                    dlab,
-                    then: [
-                      If(we, then: [dll < datIn], orElse: [datOut8 < dll]),
-                    ],
-                    orElse: [
+              If(
+                we,
+                then: [
+                  Case(addr, [
+                    // 0x0: THR/DLL
+                    CaseItem(Const(0, width: 3), [
                       If(
-                        we,
-                        then: [txHolding < datIn, txHoldingFull < Const(1)],
-                        orElse: [datOut8 < rxData, rxReady < Const(0)],
+                        dlab,
+                        then: [dll < datIn],
+                        orElse: [txHolding < datIn, txHoldingFull < Const(1)],
                       ),
-                    ],
-                  ),
-                ]),
-                // 0x1: IER/DLM
-                CaseItem(Const(1, width: 3), [
-                  If(
-                    dlab,
-                    then: [
-                      If(we, then: [dlm < datIn], orElse: [datOut8 < dlm]),
-                    ],
-                    orElse: [
-                      If(we, then: [ier < datIn], orElse: [datOut8 < ier]),
-                    ],
-                  ),
-                ]),
-                // 0x2: IIR/FCR
-                CaseItem(Const(2, width: 3), [
-                  If(we, then: [fcr < datIn], orElse: [datOut8 < computedIir]),
-                ]),
-                // 0x3: LCR
-                CaseItem(Const(3, width: 3), [
-                  If(we, then: [lcr < datIn], orElse: [datOut8 < lcr]),
-                ]),
-                // 0x4: MCR
-                CaseItem(Const(4, width: 3), [
-                  If(we, then: [mcr < datIn], orElse: [datOut8 < mcr]),
-                ]),
-                // 0x5: LSR (read-only)
-                CaseItem(Const(5, width: 3), [datOut8 < lsr]),
-                // 0x6: MSR (read-only stub)
-                CaseItem(Const(6, width: 3), [datOut8 < Const(0, width: 8)]),
-                // 0x7: SCR
-                CaseItem(Const(7, width: 3), [
-                  If(we, then: [scr < datIn], orElse: [datOut8 < scr]),
-                ]),
-              ]),
+                    ]),
+                    // 0x1: IER/DLM
+                    CaseItem(Const(1, width: 3), [
+                      If(dlab, then: [dlm < datIn], orElse: [ier < datIn]),
+                    ]),
+                    // 0x2: FCR
+                    CaseItem(Const(2, width: 3), [fcr < datIn]),
+                    // 0x3: LCR
+                    CaseItem(Const(3, width: 3), [lcr < datIn]),
+                    // 0x4: MCR
+                    CaseItem(Const(4, width: 3), [mcr < datIn]),
+                    // 0x5 LSR and 0x6 MSR are read-only.
+                    // 0x7: SCR
+                    CaseItem(Const(7, width: 3), [scr < datIn]),
+                  ]),
+                ],
+                orElse: readItems,
+              ),
             ],
           ),
         ],

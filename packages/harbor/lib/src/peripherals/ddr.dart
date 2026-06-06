@@ -1,6 +1,9 @@
+import 'package:rohd/rohd.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
+import 'ddr_phy_ecp5.dart';
+import 'ddr_sequencer.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
@@ -153,16 +156,13 @@ class HarborDdrConfig with HarborPrettyString {
   }
 }
 
-/// SDRAM memory controller.
+/// SDRAM memory controller: a bus slave face over a PHY-agnostic
+/// [DdrSequencer] and a target-specific PHY.
 ///
-/// Supports SDR SDRAM through DDR5, providing a bus slave interface
-/// to external memory. The actual PHY is target-specific:
-/// - SDR: direct pin connection (no serialization needed)
-/// - ECP5: uses ECLK/DQSBUF primitives (LiteDRAM pattern)
-/// - Xilinx 7: uses MIG (Memory Interface Generator) IP
-///
-/// This module provides the controller logic. The PHY is
-/// instantiated separately or via a vendor-specific wrapper.
+/// DDR3/DDR3L is implemented with [DdrPhyEcp5] (ODDRX1F/IDDRX1F gearing,
+/// DLL-off, hardware-verified on the OrangeCrab). Other memory types are
+/// unimplemented shells until their PHYs exist; a Xilinx 7-series PHY for
+/// the Arty S7 reuses the sequencer.
 class HarborDdrController extends BridgeModule
     with HarborDeviceTreeNodeProvider {
   /// Memory configuration.
@@ -171,24 +171,39 @@ class HarborDdrController extends BridgeModule
   /// Base address in the SoC memory map.
   final int baseAddress;
 
+  /// The controller/bus clock in Hz. All DRAM timing counters derive from
+  /// this clock, not from [HarborDdrConfig.frequency] (the part's rated
+  /// speed): in the DLL-off bring-up configuration, DDR CK runs at the
+  /// system clock.
+  final int clockHz;
+
+  /// Bring-up diagnostic, see [DdrSequencer.mprDebug]: every read returns
+  /// the part's MPR training pattern (0xFFFF0000) instead of array data.
+  final bool mprDebug;
+
   /// Bus slave port (CPU-side).
   late final BusSlavePort bus;
 
   HarborDdrController({
     required this.config,
     required this.baseAddress,
+    this.clockHz = 48000000,
+    int? busAddressWidth,
     BusProtocol protocol = BusProtocol.wishbone,
+    this.mprDebug = false,
     String? name,
   }) : super('HarborDdrController', name: name ?? 'ddr') {
     createPort('clk', PortDirection.input);
     createPort('reset', PortDirection.input);
 
-    // System-side bus interface
+    // System-side bus interface. The port carries the SoC bus width when
+    // given (the fabric connects same-width interfaces); the address is
+    // masked down to the memory's span internally.
     bus = BusSlavePort.create(
       module: this,
       name: 'bus',
       protocol: protocol,
-      addressWidth: config.size.bitLength,
+      addressWidth: busAddressWidth ?? config.size.bitLength,
       dataWidth: config.isSdr ? config.dataWidth : config.dataWidth * 2,
     );
 
@@ -199,20 +214,151 @@ class HarborDdrController extends BridgeModule
     createPort('sdram_ras_n', PortDirection.output);
     createPort('sdram_cas_n', PortDirection.output);
     createPort('sdram_we_n', PortDirection.output);
-    createPort('sdram_ba', PortDirection.output, width: config.banks.bitLength);
+    // Bank address is log2(banks) wide (8 banks -> ba[2:0]).
+    createPort(
+      'sdram_ba',
+      PortDirection.output,
+      width: (config.banks - 1).bitLength,
+    );
     createPort('sdram_addr', PortDirection.output, width: config.rowWidth);
     createPort('sdram_dm', PortDirection.output, width: config.dataWidth ~/ 8);
     createPort('sdram_dq', PortDirection.inOut, width: config.dataWidth);
 
-    // DDR-specific signals (not present on SDR)
+    // DDR-specific signals (not present on SDR). CK# and DQS# are explicit
+    // pseudo-differential complements: the part's clock and strobe
+    // receivers are differential, and the FPGA flow does not build the
+    // complement side of "D"-suffixed SSTL output types.
     if (config.isDdr) {
+      createPort('sdram_ck_n', PortDirection.output);
       createPort(
         'sdram_dqs',
         PortDirection.inOut,
         width: config.dataWidth ~/ 8,
       );
+      createPort(
+        'sdram_dqs_n',
+        PortDirection.inOut,
+        width: config.dataWidth ~/ 8,
+      );
       createPort('sdram_odt', PortDirection.output);
       createPort('sdram_reset_n', PortDirection.output);
+    }
+
+    if (config.type == HarborDdrType.ddr3 ||
+        config.type == HarborDdrType.ddr3l) {
+      _buildDdr3();
+    }
+    // Other memory types remain unimplemented shells for now.
+  }
+
+  /// Wires the DDR3 datapath: bus face -> [DdrSequencer] <-> [DdrPhyEcp5] ->
+  /// pads. Single outstanding transaction; the ack carries read data latched
+  /// from the PHY's capture window.
+  void _buildDdr3() {
+    final clk = input('clk');
+    final reset = input('reset');
+    final clkMhz = (clockHz / 1000000).round().clamp(1, 400);
+
+    // Bus face: latch one request, run it, ack on completion.
+    final busy = Logic(name: 'ddr_busy');
+    final req = Logic(name: 'ddr_req');
+    final reqWe = Logic(name: 'ddr_req_we');
+    final reqAddr = Logic(name: 'ddr_req_addr', width: 32);
+    final reqData = Logic(name: 'ddr_req_data', width: 32);
+    final reqSel = Logic(name: 'ddr_req_sel', width: 4);
+    final rdWord = Logic(name: 'ddr_rd_word', width: 32);
+
+    final seq = DdrSequencer(
+      clk,
+      reset,
+      req,
+      reqWe,
+      reqAddr,
+      reqData,
+      reqSel,
+      config: config,
+      clkMhz: clkMhz,
+      mprDebug: mprDebug,
+    );
+
+    final dqIn = Logic(name: 'ddr_dq_in', width: config.dataWidth);
+    final phy = DdrPhyEcp5(
+      clk,
+      reset,
+      cke: seq.cke,
+      csN: seq.csN,
+      cmd: seq.cmd,
+      ba: seq.ba,
+      addr: seq.addr,
+      odt: seq.odt,
+      resetN: seq.resetN,
+      wrStart: seq.wrStart,
+      wrData: seq.wrData,
+      wrMask: seq.wrMask,
+      beatSel: seq.beatSel,
+      rdStart: seq.rdStart,
+      dqIn: dqIn,
+      rowBits: config.rowWidth,
+      baBits: (config.banks - 1).bitLength,
+      dataBits: config.dataWidth,
+      clkMhz: clkMhz,
+    );
+
+    Sequential(clk, reset: reset, [
+      bus.ack < 0,
+      // ~ack keeps the ack-cycle strobe overhang from re-latching the same
+      // request: the master drops stb only after it has sampled the ack.
+      If(
+        ~busy & ~bus.ack & bus.stb,
+        then: [
+          busy < 1,
+          req < 1,
+          reqWe < bus.we,
+          // Base-relative: only the span's bits address the part, so a set
+          // bit of an (aligned) base can never leak into the row address.
+          reqAddr <
+              (bus.addr.zeroExtend(32) &
+                  Const(BigInt.from(config.size - 1), width: 32)),
+          reqData < bus.dataIn.getRange(0, 32),
+          reqSel < bus.sel.getRange(0, 4),
+        ],
+      ),
+      // The sequencer consumes the request at its IDLE state; drop the
+      // strobe once it leaves IDLE (it latched everything it needs).
+      If(seq.rdStart | seq.wrStart, then: [req < 0]),
+      If(phy.rdValid, then: [rdWord < phy.rdData]),
+      If(busy & seq.busDone, then: [busy < 0, bus.ack < 1]),
+    ]);
+    bus.dataOut <= rdWord.zeroExtend(bus.dataOut.width);
+
+    // Pads.
+    output('sdram_ck') <= phy.ckOut;
+    output('sdram_cke') <= phy.ckeOut;
+    output('sdram_cs_n') <= phy.csNOut;
+    output('sdram_ras_n') <= phy.rasNOut;
+    output('sdram_cas_n') <= phy.casNOut;
+    output('sdram_we_n') <= phy.weNOut;
+    output('sdram_ba') <= phy.baOut;
+    output('sdram_addr') <= phy.addrOut;
+    output('sdram_dm') <= phy.dmOut;
+    if (config.isDdr) {
+      output('sdram_ck_n') <= phy.ckNOut;
+      output('sdram_odt') <= phy.odtOut;
+      output('sdram_reset_n') <= phy.resetNOut;
+    }
+
+    // Bidirectional DQ/DQS through tristate drivers; reads sample the pad.
+    final dqPad = inOut('sdram_dq');
+    final dqDrive = TriStateBuffer(phy.dqOut, enable: phy.dqOe);
+    dqPad <= dqDrive.out;
+    dqIn <= dqPad;
+    if (config.isDdr) {
+      final dqsPad = inOut('sdram_dqs');
+      final dqsDrive = TriStateBuffer(phy.dqsOut, enable: phy.dqsOe);
+      dqsPad <= dqsDrive.out;
+      final dqsNPad = inOut('sdram_dqs_n');
+      final dqsNDrive = TriStateBuffer(phy.dqsNOut, enable: phy.dqsOe);
+      dqsNPad <= dqsNDrive.out;
     }
   }
 

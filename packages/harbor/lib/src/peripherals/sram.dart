@@ -12,6 +12,12 @@ import '../soc/target.dart';
 ///
 /// Uses target BRAM primitives for synthesis. For simulation (no target),
 /// uses a small register array (max 4KB).
+///
+/// Sub-word stores: the iCE40 SPRAM path honors the bus byte-lane selects
+/// through MASKWREN, and the ECP5 path through one x9 DP16KD per byte lane.
+/// The ASIC and simulation builders still write whole words, so sub-word
+/// stores clobber their neighbors there until they grow the same masking
+/// (a known follow-up).
 class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
   final int size;
   final int baseAddress;
@@ -59,7 +65,17 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
         : addr.getRange(0, addrWidth);
 
     if (target case HarborFpgaTarget fpgaTarget) {
-      _buildWithBram(fpgaTarget, clk, wordAddr, datIn, datOut, stb, we, ack);
+      _buildWithBram(
+        fpgaTarget,
+        clk,
+        wordAddr,
+        datIn,
+        datOut,
+        stb,
+        we,
+        ack,
+        bus.sel,
+      );
     } else if (target case HarborAsicTarget asicTarget) {
       _buildWithAsicSram(
         asicTarget,
@@ -86,14 +102,15 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
     Logic stb,
     Logic we,
     Logic ack,
+    Logic sel,
   ) {
     switch (target.vendor) {
       case HarborFpgaVendor.ecp5:
-        _buildEcp5Bram(clk, wordAddr, datIn, datOut, stb, we, ack);
+        _buildEcp5Bram(clk, wordAddr, datIn, datOut, stb, we, ack, sel);
       case HarborFpgaVendor.ice40:
-        _buildIce40Bram(clk, wordAddr, datIn, datOut, stb, we, ack);
+        _buildIce40Bram(clk, wordAddr, datIn, datOut, stb, we, ack, sel);
       default:
-        _buildEcp5Bram(clk, wordAddr, datIn, datOut, stb, we, ack);
+        _buildEcp5Bram(clk, wordAddr, datIn, datOut, stb, we, ack, sel);
     }
   }
 
@@ -105,19 +122,20 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
     Logic stb,
     Logic we,
     Logic ack,
+    Logic sel,
   ) {
-    // ECP5 DP16KD: 16Kbit = 1024 x 18-bit (or 2048 x 9-bit, etc.)
-    // For 32-bit data: use 2 BRAMs wide (18+18=36, use 32)
-    // For depth > 1024: stack BRAMs with address decode on upper bits
-    const bramWordDepth = 1024;
-    const bramPortWidth = 18;
+    // ECP5 DP16KD in x9 mode: 2048 x 9-bit, ONE BRAM PER BYTE LANE so each
+    // lane gets its own write enable (x18 slices straddle byte lanes and the
+    // primitive has no byte masks). Sub-word stores then honor the bus
+    // byte-lane selects by construction. In x9 mode the word address lives
+    // in AD[13:3] with the low bits zeroed.
+    const bramWordDepth = 2048;
     const bramAddrWidth = 14;
 
-    final widthBrams = (dataWidth + bramPortWidth - 1) ~/ bramPortWidth;
     final bytesPerWord = dataWidth ~/ 8;
     final numWords = size ~/ bytesPerWord;
     final depthBrams = (numWords + bramWordDepth - 1) ~/ bramWordDepth;
-    final totalBrams = widthBrams * depthBrams;
+    final totalBrams = bytesPerWord * depthBrams;
 
     // Limit: don't instantiate too many BRAMs
     if (totalBrams > 64) {
@@ -143,43 +161,41 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
 
       final bankDataParts = <Logic>[];
 
-      for (var w = 0; w < widthBrams; w++) {
-        final bitLo = w * bramPortWidth;
-        final bitHi = (bitLo + bramPortWidth).clamp(0, dataWidth);
-        final sliceWidth = bitHi - bitLo;
-
-        final addrBits = wordAddr.width < bramWordDepth.bitLength
+      for (var lane = 0; lane < bytesPerWord; lane++) {
+        final addrBits = wordAddr.width < bramWordDepth.bitLength - 1
             ? wordAddr.width
-            : bramWordDepth.bitLength;
-        final localAddr = wordAddr
-            .getRange(0, addrBits)
-            .zeroExtend(bramAddrWidth);
+            : bramWordDepth.bitLength - 1;
+        // x9 addressing: word index in AD[13:3].
+        final localAddr = [
+          wordAddr.getRange(0, addrBits).zeroExtend(bramAddrWidth - 3),
+          Const(0, width: 3),
+        ].swizzle();
 
         final bram = Ecp5Dp16kd(
-          name: 'bram_${d}_$w',
+          name: 'bram_${d}_$lane',
+          dataWidthA: 9,
+          dataWidthB: 9,
           clkA: clk,
           ceA: bankEnable,
           oceA: Const(0),
           rstA: Const(0),
           adA: localAddr,
-          diA: datIn.getRange(bitLo, bitHi).zeroExtend(bramPortWidth),
-          weA: stb & we & bankEnable,
+          diA: datIn.getRange(lane * 8, lane * 8 + 8).zeroExtend(9),
+          weA: stb & we & bankEnable & sel[lane],
           clkB: clk,
           ceB: Const(0),
           weB: Const(0),
           oceB: Const(0),
           rstB: Const(0),
           adB: Const(0, width: bramAddrWidth),
-          diB: Const(0, width: bramPortWidth),
+          diB: Const(0, width: 9),
         );
 
-        bankDataParts.add(bram.doA.getRange(0, sliceWidth));
+        bankDataParts.add(bram.doA.getRange(0, 8));
       }
 
-      // Concatenate width slices for this bank
-      final bankData = bankDataParts.length == 1
-          ? bankDataParts.first.zeroExtend(dataWidth)
-          : bankDataParts.rswizzle().getRange(0, dataWidth);
+      // Concatenate byte lanes for this bank
+      final bankData = bankDataParts.rswizzle().getRange(0, dataWidth);
 
       bankOutputs.add(bankData);
     }
@@ -213,11 +229,12 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
     Logic stb,
     Logic we,
     Logic ack,
+    Logic sel,
   ) {
     // iCE40 SPRAM (SB_SPRAM256KA): 16384 x 16-bit = 32KB each. up5k has 4
     // (128KB total). Pair SPRAMs across the data width and bank them across
-    // depth, with an address-decoded read mux. Byte lanes are written whole
-    // (MASKWREN=0xF), matching the bus's word-granular writes.
+    // depth, with an address-decoded read mux. Sub-word stores are honored
+    // through MASKWREN, driven from the bus byte-lane selects.
     const spramDepth = 16384;
     const spramWidth = 16;
     const spramAddrBits = 14;
@@ -270,7 +287,15 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
         spram.input('DATAIN').srcConnection! <=
             datIn.getRange(bitLo, bitHi).zeroExtend(spramWidth);
         spram.input('WREN').srcConnection! <= stb & we & bankEnable;
-        spram.input('MASKWREN').srcConnection! <= Const(0xF, width: 4);
+        // Each MASKWREN bit enables one nibble of the 16-bit SPRAM word, so
+        // each bus byte-lane select drives two adjacent mask bits.
+        final maskBits = <Logic>[
+          for (var n = 3; n >= 0; n--)
+            ((bitLo + n * 4) ~/ 8) < bytesPerWord
+                ? sel[(bitLo + n * 4) ~/ 8]
+                : Const(0),
+        ];
+        spram.input('MASKWREN').srcConnection! <= maskBits.swizzle();
 
         sliceOutputs.add(spram.output('DATAOUT').getRange(0, sliceWidth));
       }

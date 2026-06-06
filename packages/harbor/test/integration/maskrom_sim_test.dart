@@ -19,11 +19,12 @@ void main() {
       final tb = PeripheralTestBench(rom);
       await tb.init();
 
-      // ROM uses word addressing (addr 0, 1, 2, 3)
+      // The bus carries byte addresses; word i lives at i*4 (proven on
+      // hardware: the fetcher issues byte-addressed reads).
       expect(await tb.read(0), equals(0x00000297));
-      expect(await tb.read(1), equals(0x02028593));
-      expect(await tb.read(2), equals(0x0005a583));
-      expect(await tb.read(3), equals(0x00058067));
+      expect(await tb.read(4), equals(0x02028593));
+      expect(await tb.read(8), equals(0x0005a583));
+      expect(await tb.read(12), equals(0x00058067));
 
       await Simulator.endSimulation();
     });
@@ -64,7 +65,7 @@ void main() {
       await tb.init();
 
       for (var i = 0; i < data.length; i++) {
-        final val = await tb.read(i);
+        final val = await tb.read(i * 4);
         expect(val, equals(data[i]), reason: 'Mismatch at word $i');
       }
 

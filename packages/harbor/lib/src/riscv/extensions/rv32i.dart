@@ -14,7 +14,7 @@ final rv32i = RiscVExtension(
   key: 'I',
   misaBit: 8,
   operations: [
-    // ── Upper immediate ──
+    // Upper immediate.
     RiscVOperation(
       mnemonic: 'lui',
       opcode: RiscvOpcode.lui,
@@ -41,7 +41,7 @@ final rv32i = RiscVExtension(
       ],
     ),
 
-    // ── Jumps ──
+    // Jumps.
     RiscVOperation(
       mnemonic: 'jal',
       opcode: RiscvOpcode.jal,
@@ -79,7 +79,7 @@ final rv32i = RiscVExtension(
       ],
     ),
 
-    // ── Branches ──
+    // Branches.
     _branch('beq', BranchFunct3.beq, RiscVBranchCondition.eq),
     _branch('bne', BranchFunct3.bne, RiscVBranchCondition.ne),
     _branch('blt', BranchFunct3.blt, RiscVBranchCondition.lt),
@@ -87,19 +87,19 @@ final rv32i = RiscVExtension(
     _branch('bltu', BranchFunct3.bltu, RiscVBranchCondition.ltu),
     _branch('bgeu', BranchFunct3.bgeu, RiscVBranchCondition.geu),
 
-    // ── Loads ──
+    // Loads.
     _load('lb', LoadFunct3.lb, RiscVMemSize.byte1, false),
     _load('lh', LoadFunct3.lh, RiscVMemSize.half, false),
     _load('lw', LoadFunct3.lw, RiscVMemSize.word, false),
     _load('lbu', LoadFunct3.lbu, RiscVMemSize.byte1, true),
     _load('lhu', LoadFunct3.lhu, RiscVMemSize.half, true),
 
-    // ── Stores ──
+    // Stores.
     _store('sb', StoreFunct3.sb, RiscVMemSize.byte1),
     _store('sh', StoreFunct3.sh, RiscVMemSize.half),
     _store('sw', StoreFunct3.sw, RiscVMemSize.word),
 
-    // ── ALU immediate ──
+    // ALU immediate.
     _aluImm('addi', AluImmFunct3.addi, RiscVAluFunct.add),
     _aluImm('slti', AluImmFunct3.slti, RiscVAluFunct.slt),
     _aluImm('sltiu', AluImmFunct3.sltiu, RiscVAluFunct.sltu),
@@ -163,7 +163,7 @@ final rv32i = RiscVExtension(
       ],
     ),
 
-    // ── ALU register-register ──
+    // ALU register-register.
     _aluReg('add', AluRegFunct3.add, 0x00, RiscVAluFunct.add),
     _aluReg('sub', AluRegFunct3.add, 0x20, RiscVAluFunct.sub),
     _aluReg('sll', AluRegFunct3.sll, 0x00, RiscVAluFunct.sll),
@@ -175,7 +175,7 @@ final rv32i = RiscVExtension(
     _aluReg('or', AluRegFunct3.or, 0x00, RiscVAluFunct.or_),
     _aluReg('and', AluRegFunct3.and, 0x00, RiscVAluFunct.and_),
 
-    // ── System ──
+    // System.
     RiscVOperation(
       mnemonic: 'fence',
       opcode: RiscvOpcode.fence,
@@ -212,7 +212,7 @@ final rv32i = RiscVExtension(
   ],
 );
 
-// ── Helper constructors for repetitive patterns ──
+// Helper constructors for repetitive patterns.
 
 RiscVOperation _branch(
   String mnemonic,

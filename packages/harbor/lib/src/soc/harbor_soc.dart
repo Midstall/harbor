@@ -82,12 +82,32 @@ class HarborSoC extends BridgeModule {
 
     final hasClockDomains = clocks.isNotEmpty;
 
-    // External reset only if no PLL-derived clock domains
-    if (!hasClockDomains) {
+    // Reset source is target-aware. FPGA targets with clock domains generate
+    // an internal power-on reset: FPGA registers have a defined power-up
+    // state of zero after configuration, so a counter self-starts at 0 and
+    // holds reset asserted for its first 128 cycles, then releases forever
+    // (it deliberately has no reset of its own: the power-up value is its
+    // initializer). Everything else (FPGA SoCs without clock domains, ASIC
+    // tapeouts whose flops have NO defined power-up state, and targetless/
+    // simulation SoCs) gets a real external reset pin instead: the board,
+    // PMIC, or testbench owns reset.
+    // Without one of these, nonzero-reset state (such as a core's
+    // reset-vector PC) never loads and the SoC wedges fetching from 0.
+    final usePowerOnReset = hasClockDomains && target is HarborFpgaTarget;
+    if (!usePowerOnReset) {
       createPort('reset', PortDirection.input);
     }
 
-    final resetSignal = hasClockDomains ? Const(0) : input('reset');
+    final Logic resetSignal;
+    if (usePowerOnReset) {
+      final porCount = Logic(name: 'porCount', width: 8);
+      Sequential(input('clk'), [
+        If(~porCount[7], then: [porCount < porCount + 1]),
+      ]);
+      resetSignal = (~porCount[7]).named('porReset');
+    } else {
+      resetSignal = input('reset');
+    }
 
     _clockGen = HarborClockGenerator(
       parent: this,

@@ -252,6 +252,24 @@ class HarborClockGenerator {
   /// All created clock domains.
   List<HarborClockDomain> get domains => List.unmodifiable(_domains);
 
+  /// Builds a domain reset from [assertSrc]: assertion is immediate
+  /// (combinational, so it holds even before the domain clock runs), while
+  /// deassertion is re-timed through a two-flop synchronizer clocked in the
+  /// domain. This avoids recovery/removal hazards when the source (input
+  /// reset, power-on reset, or PLL lock) releases asynchronously to [domClk].
+  /// The pipe resets to zero while [assertSrc] is high and shifts in ones
+  /// after it falls, so reset releases two clean domain edges later. FPGA
+  /// flops power up to zero (reset asserted), and on ASIC the externally
+  /// held reset clears the pipe within two edges regardless of power-up
+  /// state.
+  Logic _domainReset(Logic domClk, Logic assertSrc, String name) {
+    final pipe = Logic(name: '${name}RstSync', width: 2);
+    Sequential(domClk, reset: assertSrc, [
+      pipe < [pipe[0], Const(1)].swizzle(),
+    ]);
+    return (assertSrc | ~pipe[1]).named('${name}Reset');
+  }
+
   /// Creates a clock domain.
   ///
   /// If [HarborClockConfig.isPrimary] is true, passes through the input clock.
@@ -261,7 +279,7 @@ class HarborClockGenerator {
       final domain = HarborClockDomain(
         config: config,
         clk: inputClk,
-        reset: inputReset,
+        reset: _domainReset(inputClk, inputReset, config.name),
       );
       _domains.add(domain);
       return domain;
@@ -281,7 +299,7 @@ class HarborClockGenerator {
       final domain = HarborClockDomain(
         config: config,
         clk: inputClk,
-        reset: inputReset,
+        reset: _domainReset(inputClk, inputReset, config.name),
       );
       _domains.add(domain);
       return domain;
@@ -293,7 +311,7 @@ class HarborClockGenerator {
       final domain = HarborClockDomain(
         config: config,
         clk: inputClk,
-        reset: inputReset,
+        reset: _domainReset(inputClk, inputReset, config.name),
       );
       _domains.add(domain);
       return domain;
@@ -351,11 +369,11 @@ class HarborClockGenerator {
     final pllClk = pll.output('PLLOUTGLOBAL');
     final pllLock = pll.output('LOCK');
 
-    // Reset is active until PLL locks
+    // Reset is active until the PLL locks, then released into the PLL clock.
     final domain = HarborClockDomain(
       config: config,
       clk: pllClk,
-      reset: inputReset | ~pllLock,
+      reset: _domainReset(pllClk, inputReset | ~pllLock, config.name),
       locked: pllLock,
     );
     _domains.add(domain);
@@ -385,7 +403,11 @@ class HarborClockGenerator {
     final domain = HarborClockDomain(
       config: config,
       clk: pll.output('CLKOP'),
-      reset: inputReset | ~pll.output('LOCK'),
+      reset: _domainReset(
+        pll.output('CLKOP'),
+        inputReset | ~pll.output('LOCK'),
+        config.name,
+      ),
       locked: pll.output('LOCK'),
     );
     _domains.add(domain);
@@ -423,7 +445,11 @@ class HarborClockGenerator {
     final domain = HarborClockDomain(
       config: config,
       clk: bufg.output('O'),
-      reset: inputReset | ~mmcm.output('LOCKED'),
+      reset: _domainReset(
+        bufg.output('O'),
+        inputReset | ~mmcm.output('LOCKED'),
+        config.name,
+      ),
       locked: mmcm.output('LOCKED'),
     );
     _domains.add(domain);

@@ -10,7 +10,7 @@ enum BusProtocol { wishbone, tilelink }
 /// A bus-protocol-agnostic slave port for peripherals.
 ///
 /// Provides a uniform internal interface (addr, dataIn, dataOut,
-/// stb, we, ack) that peripherals wire their register logic to.
+/// stb, we, sel, ack) that peripherals wire their register logic to.
 /// The external bus protocol (Wishbone, TileLink, etc.) is handled
 /// transparently.
 ///
@@ -28,8 +28,8 @@ enum BusProtocol { wishbone, tilelink }
 ///       dataWidth: 32,
 ///     );
 ///
-///     // Use bus.addr, bus.dataIn, bus.dataOut, bus.stb, bus.we, bus.ack
-///     // regardless of which protocol was chosen
+///     // Use bus.addr, bus.dataIn, bus.dataOut, bus.stb, bus.we, bus.sel,
+///     // bus.ack regardless of which protocol was chosen
 ///   }
 /// }
 /// ```
@@ -49,6 +49,10 @@ class BusSlavePort {
   /// Write enable (from master - 1=write, 0=read).
   final Logic we;
 
+  /// Byte-lane selects (from master, one bit per byte of [dataIn]). On
+  /// Wishbone this is SEL, on TileLink the A-channel mask.
+  final Logic sel;
+
   /// Acknowledge (to master - transaction complete).
   final Logic ack;
 
@@ -67,6 +71,7 @@ class BusSlavePort {
     required this.dataOut,
     required this.stb,
     required this.we,
+    required this.sel,
     required this.ack,
     this.err,
     required this.protocol,
@@ -116,6 +121,7 @@ class BusSlavePort {
       dataOut: datOut,
       stb: busIntf.cyc & busIntf.stb,
       we: busIntf.we,
+      sel: busIntf.sel,
       ack: ackOut,
       err: null,
       protocol: BusProtocol.wishbone,
@@ -164,6 +170,7 @@ class BusSlavePort {
       dataOut: datOut,
       stb: stb,
       we: we,
+      sel: busIntf.aMask,
       ack: ackOut,
       err: null,
       protocol: BusProtocol.tilelink,

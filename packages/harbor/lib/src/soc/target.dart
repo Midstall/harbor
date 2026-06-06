@@ -152,7 +152,11 @@ class HarborFpgaTarget extends HarborDeviceTarget {
 
     switch (vendor) {
       case HarborFpgaVendor.ice40:
-        buf.writeln('synth_ice40 -top $topCell -json $topCell.json');
+        // -abc2 -relut: extra ABC pass plus LUT re-mapping. Measured on the
+        // stream_v1/up5k bring-up: 4160 -> 3822 LUT4s (~8%) for synth time.
+        buf.writeln(
+          'synth_ice40 -abc2 -relut -top $topCell -json $topCell.json',
+        );
       case HarborFpgaVendor.ecp5:
         buf.writeln('synth_ecp5 -top $topCell -json $topCell.json');
       case HarborFpgaVendor.vivado:
@@ -277,11 +281,20 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     }
   }
 
+  /// A pin map value is the site name, optionally followed by
+  /// whitespace-separated IO attributes (e.g. `"C17 SSTL135_I
+  /// TERMINATION=OFF"`). The site is always the first token.
+  static String _site(String value) => value.trim().split(RegExp(r'\s+')).first;
+
+  /// The IO attributes of a pin map value (everything after the site).
+  static List<String> _ioAttrs(String value) =>
+      value.trim().split(RegExp(r'\s+')).skip(1).toList();
+
   String _generatePcf() {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated PCF for $name');
     for (final entry in pinMap.entries) {
-      buf.writeln('set_io ${entry.key} ${entry.value}');
+      buf.writeln('set_io ${entry.key} ${_site(entry.value)}');
     }
     if (frequency > 0) {
       final clkPin = pinMap['clk'];
@@ -296,8 +309,16 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated LPF for $name');
     for (final entry in pinMap.entries) {
-      buf.writeln('LOCATE COMP "${entry.key}" SITE "${entry.value}";');
-      buf.writeln('IOBUF PORT "${entry.key}" IO_TYPE=LVCMOS33;');
+      final attrs = _ioAttrs(entry.value);
+      // A bare IO type may be given as the first attribute; anything with
+      // an '=' passes through verbatim (TERMINATION, DIFFRESISTOR, ...).
+      final ioType = attrs.where((a) => !a.contains('=')).firstOrNull;
+      final extras = attrs.where((a) => a.contains('=')).join(' ');
+      buf.writeln('LOCATE COMP "${entry.key}" SITE "${_site(entry.value)}";');
+      buf.writeln(
+        'IOBUF PORT "${entry.key}" IO_TYPE=${ioType ?? 'LVCMOS33'}'
+        '${extras.isEmpty ? '' : ' $extras'};',
+      );
     }
     if (frequency > 0) {
       buf.writeln(
@@ -311,8 +332,11 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated XDC for $name');
     for (final entry in pinMap.entries) {
+      final attrs = _ioAttrs(entry.value);
+      final ioStandard = attrs.where((a) => !a.contains('=')).firstOrNull;
       buf.writeln(
-        'set_property -dict {PACKAGE_PIN ${entry.value} IOSTANDARD LVCMOS33} '
+        'set_property -dict {PACKAGE_PIN ${_site(entry.value)} '
+        'IOSTANDARD ${ioStandard ?? 'LVCMOS33'}} '
         '[get_ports {${entry.key}}]',
       );
     }

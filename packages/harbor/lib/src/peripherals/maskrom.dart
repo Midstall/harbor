@@ -61,17 +61,32 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
 
     final depth = initialData.isEmpty ? 1 : initialData.length;
     final addrWidth = depth.bitLength.clamp(1, 64);
+    // The bus carries byte addresses while initialData is word-indexed, so
+    // the default port is wide enough for the word index plus the byte-offset
+    // bits, and the offset bits are dropped before the lookup. Indexing by
+    // the raw byte address served every Nth word instead of consecutive
+    // ones, which scrambled fetched instruction streams.
+    final byteShift = (dataWidth ~/ 8 - 1).bitLength;
 
     bus = BusSlavePort.create(
       module: this,
       name: 'bus',
       protocol: protocol,
-      addressWidth: busAddressWidth ?? addrWidth,
+      addressWidth: busAddressWidth ?? (addrWidth + byteShift),
       dataWidth: busDataWidth ?? dataWidth,
     );
 
     final clk = input('clk');
-    final addr = bus.addr.getRange(0, addrWidth);
+    if (bus.addr.width <= byteShift) {
+      throw ArgumentError(
+        'HarborMaskRom: busAddressWidth (${bus.addr.width}) is too narrow to '
+        'carry byte addresses for $dataWidth-bit words',
+      );
+    }
+    final idxHi = byteShift + addrWidth <= bus.addr.width
+        ? byteShift + addrWidth
+        : bus.addr.width;
+    final addr = bus.addr.getRange(byteShift, idxHi).zeroExtend(addrWidth);
     final datOutInternal = Logic(name: 'rom_data', width: dataWidth);
     bus.dataOut <= datOutInternal.zeroExtend(bus.dataOut.width);
     final ack = bus.ack;

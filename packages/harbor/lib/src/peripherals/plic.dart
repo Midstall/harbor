@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// RISC-V Platform-Level Interrupt Controller (PLIC), SiFive-compatible.
@@ -15,7 +16,8 @@ import '../soc/device_tree.dart';
 /// - Claim/Complete: 0x200004 + ctx*0x1000 (4 bytes per context)
 ///
 /// Address space: 64 MB (0x4000000).
-class HarborPlic extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborPlic extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   final int? busDataWidth;
   final int sources;
   final int contexts;
@@ -232,5 +234,18 @@ class HarborPlic extends BridgeModule with HarborDeviceTreeNodeProvider {
     interruptController: true,
     interruptCells: 1,
     properties: {'riscv,ndev': sources},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x4000000)],
+    properties: {
+      'compatible': ['sifive,plic-1.0.0'],
+      'riscv,ndev': sources,
+      'interrupt-controller': true,
+      '#interrupt-cells': 1,
+    },
   );
 }

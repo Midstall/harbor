@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// I2C master/slave controller.
@@ -17,7 +18,7 @@ import '../soc/device_tree.dart';
 ///
 /// Supports standard (100 kHz), fast (400 kHz), and fast-plus (1 MHz).
 class HarborI2cController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -248,5 +249,17 @@ class HarborI2cController extends BridgeModule
     compatible: ['harbor,i2c', 'opencores,i2c-ocores'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'#address-cells': 1, '#size-cells': 0},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,i2c', 'opencores,i2c-ocores'],
+      '#address-cells': 1,
+      '#size-cells': 0,
+    },
   );
 }

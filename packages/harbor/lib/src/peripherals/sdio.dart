@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
 
@@ -170,7 +171,7 @@ class HarborSdioConfig with HarborPrettyString {
 /// - 0x30: INT_STATUS (interrupt status, write-1-to-clear)
 /// - 0x34: INT_ENABLE (interrupt enable)
 class HarborSdioController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Controller configuration.
   final HarborSdioConfig config;
 
@@ -384,6 +385,27 @@ class HarborSdioController extends BridgeModule
     compatible: config.supportsEmmc ? ['harbor,sdhci-emmc'] : ['harbor,sdhci'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      'bus-width': config.maxBusWidth.width,
+      'max-frequency': config.maxFrequency,
+      if (config.supports1v8) 'sd-uhs-sdr12': true,
+      if (config.supports1v8) 'sd-uhs-sdr25': true,
+      if (config.maxSpeed.index >= HarborSdioSpeed.sdr50.index)
+        'sd-uhs-sdr50': true,
+      if (config.maxSpeed.index >= HarborSdioSpeed.sdr104.index)
+        'sd-uhs-sdr104': true,
+      if (config.supportsEmmc) 'non-removable': true,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': config.supportsEmmc
+          ? ['harbor,sdhci-emmc']
+          : ['harbor,sdhci'],
       'bus-width': config.maxBusWidth.width,
       'max-frequency': config.maxFrequency,
       if (config.supports1v8) 'sd-uhs-sdr12': true,

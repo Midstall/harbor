@@ -48,8 +48,8 @@ void main() {
       expect(pretty, contains('    compatible:'));
     });
 
-    test('HarborDeviceTreeCpu toPrettyString', () {
-      const cpu = HarborDeviceTreeCpu(
+    test('HarborCpu toPrettyString', () {
+      const cpu = HarborCpu(
         hartId: 0,
         isa: 'rv64imac',
         mmu: 'riscv,sv39',

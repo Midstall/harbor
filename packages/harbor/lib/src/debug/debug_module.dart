@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// RISC-V Debug Module (DM) per the RISC-V Debug Specification 1.0.
@@ -22,7 +23,8 @@ import '../soc/device_tree.dart';
 /// - 0x12: haltsum1     0x16: abstracts    0x17: command
 /// - 0x18: abstractauto 0x20-0x2F: progbuf  0x38: sbcs
 /// - 0x39: sbaddress0   0x3C: sbdata0
-class HarborDebugModule extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborDebugModule extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address for the debug module's memory-mapped registers.
   final int baseAddress;
 
@@ -238,5 +240,17 @@ class HarborDebugModule extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['harbor,debug-module', 'riscv,debug-013'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'num-harts': numHarts, 'progbuf-size': progBufSize},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,debug-module', 'riscv,debug-013'],
+      'num-harts': numHarts,
+      'progbuf-size': progBufSize,
+    },
   );
 }

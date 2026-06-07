@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// RISC-V Advanced Platform-Level Interrupt Controller (APLIC).
@@ -20,7 +21,8 @@ import '../soc/device_tree.dart';
 /// - `target[i]`:     0x3004 + (i-1)*4
 /// - IDC per hart:    0x4000 + hart*32
 ///   - `idelivery` +0x00, `iforce` +0x04, `ithreshold` +0x08, `claimi` +0x1C
-class HarborAplic extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborAplic extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   final int sources;
   final int harts;
   final int priorityBits;
@@ -317,5 +319,18 @@ class HarborAplic extends BridgeModule with HarborDeviceTreeNodeProvider {
     interruptController: true,
     interruptCells: 2,
     properties: {'riscv,num-sources': sources},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x8000)],
+    properties: {
+      'compatible': ['riscv,aplic'],
+      'riscv,num-sources': sources,
+      'interrupt-controller': true,
+      '#interrupt-cells': 2,
+    },
   );
 }

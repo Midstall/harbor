@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// SPI master/slave controller.
@@ -16,7 +17,7 @@ import '../soc/device_tree.dart';
 ///
 /// Supports both master and slave mode. CPOL/CPHA configurable.
 class HarborSpiController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -236,5 +237,18 @@ class HarborSpiController extends BridgeModule
     compatible: ['harbor,spi', 'opencores,spi-oc'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'num-cs': csCount, '#address-cells': 1, '#size-cells': 0},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,spi', 'opencores,spi-oc'],
+      'num-cs': csCount,
+      '#address-cells': 1,
+      '#size-cells': 0,
+    },
   );
 }

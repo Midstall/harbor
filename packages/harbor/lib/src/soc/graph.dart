@@ -1,3 +1,4 @@
+import 'cpu.dart';
 import 'device_tree.dart';
 
 /// Generates Mermaid and Graphviz DOT diagrams of a SoC's bus fabric
@@ -6,7 +7,7 @@ import 'device_tree.dart';
 /// ```dart
 /// final graph = HarborSoCGraphGenerator(
 ///   name: 'Creek V1',
-///   cpus: [HarborDeviceTreeCpu(hartId: 0, isa: 'rv64imac')],
+///   cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
 ///   peripherals: [clint, plic, uart, sram],
 /// );
 ///
@@ -18,7 +19,7 @@ class HarborSoCGraphGenerator {
   final String name;
 
   /// CPU entries.
-  final List<HarborDeviceTreeCpu> cpus;
+  final List<HarborCpu> cpus;
 
   /// Peripheral nodes.
   final List<HarborDeviceTreeNodeProvider> peripherals;

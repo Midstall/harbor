@@ -1,5 +1,6 @@
 import '../bus/bus.dart';
 import '../util/pretty_string.dart';
+import 'cpu.dart';
 
 /// A device tree node - an immutable value object describing a device's
 /// presence in the device tree.
@@ -112,55 +113,14 @@ mixin HarborDeviceTreeNodeProvider {
   HarborDeviceTreeNode get dtNode;
 }
 
-/// Configuration for CPU entries in the device tree.
-class HarborDeviceTreeCpu with HarborPrettyString {
-  /// Hart ID.
-  final int hartId;
-
-  /// ISA string, e.g. `"rv64imac"`.
-  final String isa;
-
-  /// Clock frequency in Hz (optional).
-  final int? clockFrequency;
-
-  /// MMU type, e.g. `"riscv,sv39"` (optional).
-  final String? mmu;
-
-  const HarborDeviceTreeCpu({
-    required this.hartId,
-    required this.isa,
-    this.clockFrequency,
-    this.mmu,
-  });
-
-  @override
-  String toString() => 'HarborDeviceTreeCpu(hart$hartId, $isa)';
-
-  @override
-  String toPrettyString([
-    HarborPrettyStringOptions options = const HarborPrettyStringOptions(),
-  ]) {
-    final p = options.prefix;
-    final c = options.childPrefix;
-    final buf = StringBuffer('${p}HarborDeviceTreeCpu(\n');
-    buf.writeln('${c}hartId: $hartId,');
-    buf.writeln('${c}isa: $isa,');
-    if (mmu != null) buf.writeln('${c}mmu: $mmu,');
-    if (clockFrequency != null)
-      buf.writeln('${c}clockFrequency: $clockFrequency,');
-    buf.write('$p)');
-    return buf.toString();
-  }
-}
-
 /// Generates a Linux/U-Boot compatible `.dts` file from a list of
-/// [HarborDeviceTreeNodeProvider] peripherals and [HarborDeviceTreeCpu] entries.
+/// [HarborDeviceTreeNodeProvider] peripherals and [HarborCpu] entries.
 ///
 /// ```dart
 /// final dts = HarborDeviceTreeGenerator(
 ///   model: 'Midstall Creek V1',
 ///   compatible: 'midstall,creek-v1',
-///   cpus: [HarborDeviceTreeCpu(hartId: 0, isa: 'rv64imac')],
+///   cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
 ///   peripherals: [clint, plic, uart],
 /// ).generate();
 /// ```
@@ -178,7 +138,7 @@ class HarborDeviceTreeGenerator {
   final int sizeCells;
 
   /// CPU entries.
-  final List<HarborDeviceTreeCpu> cpus;
+  final List<HarborCpu> cpus;
 
   /// Peripheral nodes implementing [HarborDeviceTreeNodeProvider].
   final List<HarborDeviceTreeNodeProvider> peripherals;

@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// eFuse bank configuration.
@@ -189,7 +190,8 @@ class HarborEfuseBlock extends BridgeModule {
 /// - 0x14: LOCK       (per-region lock bits, write-1-to-lock)
 /// - 0x18: TIMING     (program pulse width in clock cycles)
 /// - 0x1C: KEY        (write 0x4F545021 to unlock programming)
-class HarborEfuseDevice extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborEfuseDevice extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -438,6 +440,22 @@ class HarborEfuseDevice extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['harbor,efuse', 'harbor,otp'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      'harbor,total-bits': config.totalBits,
+      'harbor,bits-per-word': config.bitsPerWord,
+      'harbor,regions': config.regions,
+      'harbor,unlock-key': programUnlockKey,
+      '#address-cells': 1,
+      '#size-cells': 1,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,efuse', 'harbor,otp'],
       'harbor,total-bits': config.totalBits,
       'harbor,bits-per-word': config.bitsPerWord,
       'harbor,regions': config.regions,

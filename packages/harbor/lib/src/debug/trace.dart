@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// Trace packet type.
@@ -45,7 +46,7 @@ enum HarborTracePacketType {
 /// - 0x18: BUF_WR   (current write pointer, read-only)
 /// - 0x1C: SYNC_CNT (sync packet interval in branches)
 class HarborTraceEncoder extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address for trace registers.
   final int baseAddress;
 
@@ -244,5 +245,17 @@ class HarborTraceEncoder extends BridgeModule
     compatible: ['riscv,trace'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'buffer-size': bufferSize, 'sync-interval': syncInterval},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['riscv,trace'],
+      'buffer-size': bufferSize,
+      'sync-interval': syncInterval,
+    },
   );
 }

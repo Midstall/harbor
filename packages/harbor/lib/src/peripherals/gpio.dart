@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// General-Purpose I/O (GPIO) peripheral.
@@ -17,7 +18,8 @@ import '../soc/device_tree.dart';
 /// - 0x0C: IRQ_EN  (read/write, interrupt enable per pin)
 /// - 0x10: IRQ_STATUS (read/write-1-to-clear, interrupt status)
 /// - 0x14: IRQ_EDGE (read/write, 0=level, 1=edge triggered)
-class HarborGpio extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborGpio extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Number of GPIO pins.
   final int pinCount;
 
@@ -171,5 +173,18 @@ class HarborGpio extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['harbor,gpio', 'sifive,gpio0'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'ngpios': pinCount, '#gpio-cells': 2, 'gpio-controller': true},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,gpio', 'sifive,gpio0'],
+      'ngpios': pinCount,
+      '#gpio-cells': 2,
+      'gpio-controller': true,
+    },
   );
 }

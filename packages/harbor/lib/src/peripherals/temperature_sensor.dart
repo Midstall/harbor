@@ -6,6 +6,7 @@ import '../blackbox/xilinx/xilinx.dart';
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../pdk/pdk_provider.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../soc/target.dart';
 
@@ -49,7 +50,7 @@ enum HarborTemperatureSource {
 /// - 0x18: INT_STATUS (read/write-1-to-clear)
 /// - 0x1C: INT_ENABLE (read/write, interrupt enable mask)
 class HarborTemperatureSensor extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -324,5 +325,17 @@ class HarborTemperatureSensor extends BridgeModule
     compatible: ['harbor,temp-sensor'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'#thermal-sensor-cells': 0, 'harbor,source': source.name},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,temp-sensor'],
+      '#thermal-sensor-cells': 0,
+      'harbor,source': source.name,
+    },
   );
 }

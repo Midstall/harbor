@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// RISC-V Core Local Interruptor (CLINT), SiFive-compatible.
@@ -16,7 +17,8 @@ import '../soc/device_tree.dart';
 /// - `mtime`:          0xBFF8           (8 bytes, machine timer)
 ///
 /// Address space: 64 KB (0x10000).
-class HarborClint extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborClint extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   final int? busDataWidth;
 
   /// Number of harts this CLINT serves.
@@ -167,5 +169,16 @@ class HarborClint extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['riscv,clint0'],
     reg: BusAddressRange(baseAddress, 0x10000),
     properties: {'reg-names': 'control'},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x10000)],
+    properties: {
+      'compatible': ['riscv,clint0'],
+      'reg-names': 'control',
+    },
   );
 }

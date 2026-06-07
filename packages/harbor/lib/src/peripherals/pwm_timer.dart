@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// PWM/Timer peripheral.
@@ -20,7 +21,8 @@ import '../soc/device_tree.dart';
 /// Global registers:
 /// - 0x00: GLOBAL_CTRL (global enable)
 /// - 0x04: INT_STATUS  (per-channel interrupt status, W1C)
-class HarborPwmTimer extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborPwmTimer extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Number of timer/PWM channels.
   final int channels;
 
@@ -262,5 +264,17 @@ class HarborPwmTimer extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['harbor,pwm-timer'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'#pwm-cells': 3, 'num-channels': channels},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,pwm-timer'],
+      '#pwm-cells': 3,
+      'num-channels': channels,
+    },
   );
 }

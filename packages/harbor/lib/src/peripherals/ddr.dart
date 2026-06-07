@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import 'ddr_phy_ecp5.dart';
 import 'ddr_sequencer.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
 
@@ -164,7 +165,7 @@ class HarborDdrConfig with HarborPrettyString {
 /// unimplemented shells until their PHYs exist; a Xilinx 7-series PHY for
 /// the Arty S7 reuses the sequencer.
 class HarborDdrController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   final int? busDataWidth;
 
   /// Memory configuration.
@@ -386,6 +387,25 @@ class HarborDdrController extends BridgeModule
     ],
     reg: BusAddressRange(baseAddress, config.size),
     properties: {
+      'sdram-type': config.type.name,
+      'data-width': config.dataWidth,
+      'clock-frequency': config.frequency,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, config.size)],
+    properties: {
+      'compatible': [
+        'harbor,sdram-controller',
+        if (config.isSdr) 'harbor,sdr-sdram',
+        if (config.type == HarborDdrType.ddr3 ||
+            config.type == HarborDdrType.ddr3l)
+          'harbor,ddr3-sdram',
+      ],
       'sdram-type': config.type.name,
       'data-width': config.dataWidth,
       'clock-frequency': config.frequency,

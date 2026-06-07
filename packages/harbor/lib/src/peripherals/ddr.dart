@@ -317,10 +317,18 @@ class HarborDdrController extends BridgeModule
           // Base-relative: only the span's bits address the part, so a set
           // bit of an (aligned) base can never leak into the row address.
           reqAddr <
-              (bus.addr.zeroExtend(32) &
+              ((bus.addr.width > 32
+                      ? bus.addr.getRange(0, 32)
+                      : bus.addr.zeroExtend(32)) &
                   Const(BigInt.from(config.size - 1), width: 32)),
-          reqData < bus.dataIn.getRange(0, 32),
-          reqSel < bus.sel.getRange(0, 4),
+          reqData <
+              (bus.dataIn.width > 32
+                  ? bus.dataIn.getRange(0, 32)
+                  : bus.dataIn.zeroExtend(32)),
+          reqSel <
+              (bus.sel.width > 4
+                  ? bus.sel.getRange(0, 4)
+                  : bus.sel.zeroExtend(4)),
         ],
       ),
       // The sequencer consumes the request at its IDLE state; drop the

@@ -165,6 +165,8 @@ class HarborDdrConfig with HarborPrettyString {
 /// the Arty S7 reuses the sequencer.
 class HarborDdrController extends BridgeModule
     with HarborDeviceTreeNodeProvider {
+  final int? busDataWidth;
+
   /// Memory configuration.
   final HarborDdrConfig config;
 
@@ -189,6 +191,7 @@ class HarborDdrController extends BridgeModule
     required this.baseAddress,
     this.clockHz = 48000000,
     int? busAddressWidth,
+    this.busDataWidth,
     BusProtocol protocol = BusProtocol.wishbone,
     this.mprDebug = false,
     String? name,
@@ -204,7 +207,9 @@ class HarborDdrController extends BridgeModule
       name: 'bus',
       protocol: protocol,
       addressWidth: busAddressWidth ?? config.size.bitLength,
-      dataWidth: config.isSdr ? config.dataWidth : config.dataWidth * 2,
+      dataWidth:
+          busDataWidth ??
+          (config.isSdr ? config.dataWidth : config.dataWidth * 2),
     );
 
     // SDRAM pin signals (active-low control)

@@ -26,6 +26,7 @@ import '../soc/device_tree.dart';
 /// whole addressed word with every register in its lane, so masters that
 /// issue word-aligned loads extract the byte they want.
 class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
+  final int? busDataWidth;
   final int baseAddress;
   final int clockFrequency;
 
@@ -42,7 +43,7 @@ class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
     required this.baseAddress,
     this.clockFrequency = 0,
     int? busAddressWidth,
-    int? busDataWidth,
+    this.busDataWidth,
     BusProtocol protocol = BusProtocol.wishbone,
     String? name,
   }) : super('HarborUart', name: name ?? 'uart') {

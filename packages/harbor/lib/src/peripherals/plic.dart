@@ -16,6 +16,7 @@ import '../soc/device_tree.dart';
 ///
 /// Address space: 64 MB (0x4000000).
 class HarborPlic extends BridgeModule with HarborDeviceTreeNodeProvider {
+  final int? busDataWidth;
   final int sources;
   final int contexts;
   final int priorityBits;
@@ -33,7 +34,7 @@ class HarborPlic extends BridgeModule with HarborDeviceTreeNodeProvider {
     this.contexts = 1,
     this.priorityBits = 3,
     int? busAddressWidth,
-    int? busDataWidth,
+    this.busDataWidth,
     BusProtocol protocol = BusProtocol.wishbone,
     String? name,
   }) : super('HarborPlic', name: name ?? 'plic') {

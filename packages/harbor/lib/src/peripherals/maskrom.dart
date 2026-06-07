@@ -32,6 +32,8 @@ import '../util/elf_loader.dart';
 /// );
 /// ```
 class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
+  final int? busDataWidth;
+
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -52,7 +54,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
     required this.initialData,
     this.dataWidth = 32,
     int? busAddressWidth,
-    int? busDataWidth,
+    this.busDataWidth,
     BusProtocol protocol = BusProtocol.wishbone,
     String? name,
   }) : super('HarborMaskRom', name: name ?? 'maskrom') {
@@ -121,6 +123,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
     File file, {
     required int baseAddress,
     int dataWidth = 32,
+    int? busDataWidth,
     String? name,
   }) {
     final elf = HarborElfLoader.fromFile(file);
@@ -132,6 +135,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
       baseAddress: baseAddress,
       initialData: words,
       dataWidth: dataWidth,
+      busDataWidth: busDataWidth,
       name: name,
     );
   }
@@ -143,6 +147,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
     File file, {
     required int baseAddress,
     int dataWidth = 32,
+    int? busDataWidth,
     String? name,
   }) {
     final bytes = file.readAsBytesSync();
@@ -161,6 +166,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
       baseAddress: baseAddress,
       initialData: words,
       dataWidth: dataWidth,
+      busDataWidth: busDataWidth,
       name: name,
     );
   }
@@ -170,6 +176,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
     Uint8List bytes, {
     required int baseAddress,
     int dataWidth = 32,
+    int? busDataWidth,
     String? name,
   }) {
     final bytesPerWord = dataWidth ~/ 8;
@@ -187,6 +194,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
       baseAddress: baseAddress,
       initialData: words,
       dataWidth: dataWidth,
+      busDataWidth: busDataWidth,
       name: name,
     );
   }
@@ -198,6 +206,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
     File file, {
     required int baseAddress,
     int dataWidth = 32,
+    int? busDataWidth,
     String? name,
   }) {
     final lines = file.readAsLinesSync();
@@ -232,6 +241,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
         baseAddress: baseAddress,
         initialData: [],
         dataWidth: dataWidth,
+        busDataWidth: busDataWidth,
         name: name,
       );
     }
@@ -254,6 +264,7 @@ class HarborMaskRom extends BridgeModule with HarborDeviceTreeNodeProvider {
       baseAddress: baseAddress,
       initialData: words,
       dataWidth: dataWidth,
+      busDataWidth: busDataWidth,
       name: name,
     );
   }

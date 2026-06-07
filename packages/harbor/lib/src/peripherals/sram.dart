@@ -19,6 +19,7 @@ import '../soc/target.dart';
 /// stores clobber their neighbors there until they grow the same masking
 /// (a known follow-up).
 class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
+  final int? busDataWidth;
   final int size;
   final int baseAddress;
   final int dataWidth;
@@ -30,6 +31,7 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
     required this.size,
     this.dataWidth = 32,
     int? busAddressWidth,
+    this.busDataWidth,
     BusProtocol protocol = BusProtocol.wishbone,
     HarborDeviceTarget? target,
     String? name,
@@ -49,7 +51,7 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
       name: 'bus',
       protocol: protocol,
       addressWidth: effectiveAddrWidth,
-      dataWidth: dataWidth,
+      dataWidth: busDataWidth ?? dataWidth,
     );
 
     final clk = input('clk');
@@ -353,7 +355,7 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
     final sramBlock = _PdkSramMacro(
       macroName: macro.properties['name'] ?? 'sram_macro',
       addrWidth: wordAddr.width,
-      dataWidth: dataWidth,
+      dataWidth: busDataWidth ?? dataWidth,
       pinMapping: macro.pinMapping,
     );
     addSubModule(sramBlock);

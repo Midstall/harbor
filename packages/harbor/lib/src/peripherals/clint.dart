@@ -17,6 +17,8 @@ import '../soc/device_tree.dart';
 ///
 /// Address space: 64 KB (0x10000).
 class HarborClint extends BridgeModule with HarborDeviceTreeNodeProvider {
+  final int? busDataWidth;
+
   /// Number of harts this CLINT serves.
   final int hartCount;
 
@@ -36,7 +38,7 @@ class HarborClint extends BridgeModule with HarborDeviceTreeNodeProvider {
     required this.baseAddress,
     this.hartCount = 1,
     int? busAddressWidth,
-    int? busDataWidth,
+    this.busDataWidth,
     BusProtocol protocol = BusProtocol.wishbone,
     String? name,
   }) : super('HarborClint', name: name ?? 'clint') {

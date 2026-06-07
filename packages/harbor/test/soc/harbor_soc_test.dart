@@ -39,7 +39,7 @@ void main() {
         name: 'TestSoC',
         compatible: 'test,soc-v1',
         busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
-        cpus: [HarborDeviceTreeCpu(hartId: 0, isa: 'rv64imac')],
+        cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
       );
 
       soc.addPeripheral(HarborClint(baseAddress: 0x02000000));

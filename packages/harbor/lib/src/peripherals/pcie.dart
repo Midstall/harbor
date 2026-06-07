@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
 
@@ -148,7 +149,7 @@ class HarborPcieConfig with HarborPrettyString {
 ///
 /// ECAM space is mapped at a separate memory region for config access.
 class HarborPcieController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// PCIe configuration.
   final HarborPcieConfig config;
 
@@ -382,6 +383,25 @@ class HarborPcieController extends BridgeModule
         : ['harbor,pcie-ep'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      'device_type': 'pci',
+      '#address-cells': 3,
+      '#size-cells': 2,
+      'max-link-speed': config.maxGen.gen,
+      'num-lanes': config.maxLanes.count,
+      'msi-parent': true,
+      'bus-range': [0, 255],
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': config.role == HarborPcieRole.rootComplex
+          ? ['harbor,pcie-host', 'pci-host-ecam-generic']
+          : ['harbor,pcie-ep'],
       'device_type': 'pci',
       '#address-cells': 3,
       '#size-cells': 2,

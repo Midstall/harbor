@@ -8,6 +8,8 @@ import '../bus/wishbone/wishbone_decoder.dart';
 import '../bus/wishbone/wishbone_interface.dart';
 import '../clock/clock_domain.dart';
 import '../pdk/klayout.dart';
+import 'acpi.dart';
+import 'cpu.dart';
 import 'device_tree.dart';
 import 'graph.dart';
 import 'target.dart';
@@ -55,7 +57,7 @@ class HarborSoC extends BridgeModule {
   final Object busConfig;
 
   /// CPU information for the device tree.
-  final List<HarborDeviceTreeCpu> cpus;
+  final List<HarborCpu> cpus;
 
   /// Build target (FPGA or ASIC). Controls what scripts are generated.
   final HarborDeviceTarget? target;
@@ -66,6 +68,9 @@ class HarborSoC extends BridgeModule {
   late final HarborClockGenerator _clockGen;
   final Map<String, HarborClockDomain> _clockDomains = {};
 
+  final String acpiOemId;
+  final String acpiOemTableId;
+
   /// Creates a new SoC.
   ///
   /// Accepts an optional list of [clocks] to generate PLL-derived
@@ -74,6 +79,8 @@ class HarborSoC extends BridgeModule {
     required String name,
     required this.compatible,
     required this.busConfig,
+    this.acpiOemId = 'MIDSTL',
+    this.acpiOemTableId = 'HARBOR',
     this.cpus = const [],
     this.target,
     List<HarborClockConfig> clocks = const [],
@@ -298,6 +305,19 @@ class HarborSoC extends BridgeModule {
     }
   }
 
+  /// Generates a ACPICA compatible `.asl` file.
+  String generateAcpi() {
+    return HarborAcpiGenerator(
+      oemId: acpiOemId,
+      oemTableId: acpiOemTableId,
+      cpus: cpus,
+      peripherals: _peripherals
+          .map((e) => e.module)
+          .whereType<HarborAcpiDeviceProvider>()
+          .toList(),
+    ).generate();
+  }
+
   /// Generates a Linux/U-Boot compatible `.dts` file.
   String generateDts() {
     return HarborDeviceTreeGenerator(
@@ -357,6 +377,9 @@ class HarborSoC extends BridgeModule {
     if (blackboxStubs.isNotEmpty) {
       File('$path/blackboxes.v').writeAsStringSync(blackboxStubs);
     }
+
+    // ACPI
+    File('$path/$name.asl').writeAsStringSync(generateAcpi());
 
     // Device tree
     File('$path/$name.dts').writeAsStringSync(generateDts());

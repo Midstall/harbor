@@ -14,9 +14,7 @@ void main() {
       final dts = HarborDeviceTreeGenerator(
         model: 'Test SoC',
         compatible: 'test,soc-v1',
-        cpus: [
-          HarborDeviceTreeCpu(hartId: 0, isa: 'rv64imac', mmu: 'riscv,sv39'),
-        ],
+        cpus: [HarborCpu(hartId: 0, isa: 'rv64imac', mmu: 'riscv,sv39')],
         peripherals: [clint, plic, uart],
       ).generate();
 
@@ -61,8 +59,8 @@ void main() {
         model: 'Multi',
         compatible: 'test,multi',
         cpus: [
-          HarborDeviceTreeCpu(hartId: 0, isa: 'rv32imac'),
-          HarborDeviceTreeCpu(hartId: 1, isa: 'rv32imac'),
+          HarborCpu(hartId: 0, isa: 'rv32imac'),
+          HarborCpu(hartId: 1, isa: 'rv32imac'),
         ],
       ).generate();
 

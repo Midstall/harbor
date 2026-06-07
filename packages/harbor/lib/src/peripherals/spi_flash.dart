@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
 
@@ -126,7 +127,7 @@ class HarborSpiFlashConfig with HarborPrettyString {
 /// Supports XIP (Execute In Place) - the CPU can fetch instructions
 /// directly from the SPI flash.
 class HarborSpiFlashController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// HarborFlash configuration.
   final HarborSpiFlashConfig config;
 
@@ -339,6 +340,19 @@ class HarborSpiFlashController extends BridgeModule
     compatible: ['jedec,spi-nor'],
     reg: BusAddressRange(baseAddress, config.size),
     properties: {
+      'spi-max-frequency': config.spiFrequency,
+      if (config.mode == HarborSpiFlashMode.quad) 'spi-tx-bus-width': 4,
+      if (config.mode == HarborSpiFlashMode.dual) 'spi-tx-bus-width': 2,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, config.size)],
+    properties: {
+      'compatible': ['jedec,spi-nor'],
       'spi-max-frequency': config.spiFrequency,
       if (config.mode == HarborSpiFlashMode.quad) 'spi-tx-bus-width': 4,
       if (config.mode == HarborSpiFlashMode.dual) 'spi-tx-bus-width': 2,

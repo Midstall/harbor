@@ -5,6 +5,7 @@ import '../blackbox/ecp5/ecp5.dart';
 import '../blackbox/ice40/ice40.dart';
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../soc/target.dart';
 
@@ -18,7 +19,8 @@ import '../soc/target.dart';
 /// The ASIC and simulation builders still write whole words, so sub-word
 /// stores clobber their neighbors there until they grow the same masking
 /// (a known follow-up).
-class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborSram extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   final int? busDataWidth;
   final int size;
   final int baseAddress;
@@ -438,6 +440,17 @@ class HarborSram extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['harbor,sram', 'mmio-sram'],
     reg: BusAddressRange(baseAddress, size),
     properties: {'data-width': dataWidth},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, size)],
+    properties: {
+      'compatible': ['harbor,sram', 'mmio-sram'],
+      'data-width': dataWidth,
+    },
   );
 }
 

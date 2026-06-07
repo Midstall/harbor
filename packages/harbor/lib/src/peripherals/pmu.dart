@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
 
@@ -84,7 +85,7 @@ class HarborPmuConfig with HarborPrettyString {
 ///   - +0x04: DOM_STATUS (current state, transition busy)
 ///   - +0x08: DOM_ISO    (isolation control)
 class HarborPowerManagementUnit extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// PMU configuration.
   final HarborPmuConfig config;
 
@@ -269,6 +270,18 @@ class HarborPowerManagementUnit extends BridgeModule
     compatible: ['harbor,pmu'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      '#power-domain-cells': 1,
+      'num-domains': config.domains.length,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,pmu'],
       '#power-domain-cells': 1,
       'num-domains': config.domains.length,
     },

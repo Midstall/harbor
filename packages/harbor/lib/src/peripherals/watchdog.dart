@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// HarborWatchdog timer peripheral.
@@ -20,7 +21,8 @@ import '../soc/device_tree.dart';
 /// - 0x14: COUNT   (current counter value, read-only)
 ///
 /// Magic kick value prevents accidental kicks from stray writes.
-class HarborWatchdog extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborWatchdog extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -196,5 +198,15 @@ class HarborWatchdog extends BridgeModule with HarborDeviceTreeNodeProvider {
   HarborDeviceTreeNode get dtNode => HarborDeviceTreeNode(
     compatible: ['harbor,watchdog'],
     reg: BusAddressRange(baseAddress, 0x1000),
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,watchdog'],
+    },
   );
 }

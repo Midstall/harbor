@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
 
@@ -110,7 +111,8 @@ class HarborEthernetConfig with HarborPrettyString {
 /// - 0x038: RX_DESC_BASE (RX descriptor ring base address)
 /// - 0x040: MDIO_CTRL   (PHY management: addr, reg, write, busy)
 /// - 0x044: MDIO_DATA   (PHY management data)
-class HarborEthernetMac extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborEthernetMac extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// MAC configuration.
   final HarborEthernetConfig config;
 
@@ -341,6 +343,18 @@ class HarborEthernetMac extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['harbor,ethernet'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      'phy-mode': config.phyInterface.name,
+      'max-speed': config.maxSpeed.mbps,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,ethernet'],
       'phy-mode': config.phyInterface.name,
       'max-speed': config.maxSpeed.mbps,
     },

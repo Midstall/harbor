@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
 
@@ -81,7 +82,7 @@ class HarborDmaChannelConfig with HarborPrettyString {
 /// - 0x004: INT_STATUS (per-channel interrupt status, W1C)
 /// - 0x008: INT_ENABLE (per-channel interrupt enable)
 class HarborDmaController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Number of DMA channels.
   final int channels;
 
@@ -342,5 +343,17 @@ class HarborDmaController extends BridgeModule
     compatible: ['harbor,dma'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'dma-channels': channels, '#dma-cells': 1},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,dma'],
+      'dma-channels': channels,
+      '#dma-cells': 1,
+    },
   );
 }

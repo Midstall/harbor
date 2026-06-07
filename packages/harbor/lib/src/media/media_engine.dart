@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import 'codec.dart';
 
@@ -52,7 +53,8 @@ import 'codec.dart';
 /// - +0x44: SESS_LEVEL      (codec level)
 /// - +0x48: SESS_BYTES_DONE (bytes processed, read-only)
 /// - +0x4C: SESS_FRAMES_DONE (frames processed, read-only)
-class HarborMediaEngine extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborMediaEngine extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -317,6 +319,26 @@ class HarborMediaEngine extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['harbor,media-engine'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      'max-sessions': maxSessions,
+      'harbor,codecs': codecs.map((c) => c.format.displayName).join(', '),
+      'harbor,max-width': codecs.fold<int>(
+        0,
+        (max, c) => c.maxWidth > max ? c.maxWidth : max,
+      ),
+      'harbor,max-height': codecs.fold<int>(
+        0,
+        (max, c) => c.maxHeight > max ? c.maxHeight : max,
+      ),
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,media-engine'],
       'max-sessions': maxSessions,
       'harbor,codecs': codecs.map((c) => c.format.displayName).join(', '),
       'harbor,max-width': codecs.fold<int>(

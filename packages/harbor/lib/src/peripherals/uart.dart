@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// 16550-compatible UART peripheral.
@@ -25,7 +26,8 @@ import '../soc/device_tree.dart';
 /// pick their register through the byte-lane selects, and reads return the
 /// whole addressed word with every register in its lane, so masters that
 /// issue word-aligned loads extract the byte they want.
-class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborUart extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   final int? busDataWidth;
   final int baseAddress;
   final int clockFrequency;
@@ -410,6 +412,20 @@ class HarborUart extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['ns16550a'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      'reg-shift': 0,
+      'reg-io-width': 1,
+      if (clockFrequency > 0) 'clock-frequency': clockFrequency,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PNP0501',
+    cid: ['PNP0501'],
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['ns16550a'],
       'reg-shift': 0,
       'reg-io-width': 1,
       if (clockFrequency > 0) 'clock-frequency': clockFrequency,

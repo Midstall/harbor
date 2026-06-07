@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// Read-only flash/ROM memory module.
@@ -11,7 +12,8 @@ import '../soc/device_tree.dart';
 /// interface. Write requests are silently ignored.
 ///
 /// Used for boot ROM, firmware storage, etc.
-class HarborFlash extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborFlash extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Memory size in bytes.
   final int size;
 
@@ -69,5 +71,16 @@ class HarborFlash extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['harbor,flash', 'mtd-rom'],
     reg: BusAddressRange(baseAddress, size),
     properties: {'data-width': dataWidth},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, size)],
+    properties: {
+      'compatible': ['harbor,flash', 'mtd-rom'],
+      'data-width': dataWidth,
+    },
   );
 }

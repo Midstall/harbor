@@ -2,15 +2,15 @@ import 'package:harbor/harbor.dart';
 import 'package:test/test.dart';
 
 void main() {
-  late List<HarborDeviceTreeCpu> cpus;
+  late List<HarborCpu> cpus;
   late HarborClint clint;
   late HarborPlic plic;
   late HarborUart uart;
 
   setUp(() {
     cpus = [
-      HarborDeviceTreeCpu(hartId: 0, isa: 'rv64imac'),
-      HarborDeviceTreeCpu(hartId: 1, isa: 'rv64imac'),
+      HarborCpu(hartId: 0, isa: 'rv64imac'),
+      HarborCpu(hartId: 1, isa: 'rv64imac'),
     ];
     clint = HarborClint(baseAddress: 0x02000000, hartCount: 2);
     plic = HarborPlic(baseAddress: 0x0C000000, sources: 32, contexts: 2);

@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// RISC-V IOMMU translation mode.
@@ -45,7 +46,8 @@ enum HarborIommuMode {
 /// - 0x058: cqcsr          0x05C: fqcsr      0x060: pqcsr
 /// - 0x064: ipsr           0x100: iohpmcycles
 /// - 0x108-0x1F8: iohpmctr/iohpmevt
-class HarborIommu extends BridgeModule with HarborDeviceTreeNodeProvider {
+class HarborIommu extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address for IOMMU registers.
   final int baseAddress;
 
@@ -204,6 +206,19 @@ class HarborIommu extends BridgeModule with HarborDeviceTreeNodeProvider {
     compatible: ['riscv,iommu'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      '#iommu-cells': 1,
+      'riscv,iotlb-entries': iotlbEntries,
+      'riscv,max-mode': maxMode.name,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['riscv,iommu'],
       '#iommu-cells': 1,
       'riscv,iotlb-entries': iotlbEntries,
       'riscv,max-mode': maxMode.name,

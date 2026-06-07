@@ -47,7 +47,9 @@ export 'src/clock/clock_domain.dart';
 export 'src/clock/clock_gate.dart';
 
 // SoC
+export 'src/soc/acpi.dart';
 export 'src/soc/boot_sequencer.dart';
+export 'src/soc/cpu.dart';
 export 'src/soc/device_tree.dart';
 export 'src/soc/graph.dart';
 export 'src/soc/harbor_soc.dart';

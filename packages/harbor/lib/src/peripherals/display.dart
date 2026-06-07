@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../util/pretty_string.dart';
 
@@ -226,7 +227,7 @@ class HarborDisplayConfig with HarborPrettyString {
 /// - 0x20: INT_STATUS (W1C: vblank, underrun)
 /// - 0x24: INT_ENABLE
 class HarborDisplayController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Display configuration.
   final HarborDisplayConfig config;
 
@@ -482,6 +483,19 @@ class HarborDisplayController extends BridgeModule
     compatible: ['harbor,display'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {
+      'output-interface': config.interface_.name,
+      'max-width': config.maxWidth,
+      'max-height': config.maxHeight,
+    },
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,display'],
       'output-interface': config.interface_.name,
       'max-width': config.maxWidth,
       'max-height': config.maxHeight,

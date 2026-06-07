@@ -3,6 +3,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
+import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 
 /// Reset source that can trigger a system reset.
@@ -38,7 +39,7 @@ enum HarborResetSource {
 /// - 0x14: WDOG_RST_EN (enable watchdog as reset source)
 /// - 0x18: SW_RST_KEY  (write 0xDEAD to trigger software reset)
 class HarborResetController extends BridgeModule
-    with HarborDeviceTreeNodeProvider {
+    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -232,5 +233,17 @@ class HarborResetController extends BridgeModule
     compatible: ['harbor,reset-controller'],
     reg: BusAddressRange(baseAddress, 0x1000),
     properties: {'#reset-cells': 1, 'num-domains': domainCount},
+  );
+
+  @override
+  HarborAcpiDevice get acpiDevice => HarborAcpiDevice(
+    hid: 'PRP0001',
+    uid: 0,
+    memory: [BusAddressRange(baseAddress, 0x1000)],
+    properties: {
+      'compatible': ['harbor,reset-controller'],
+      '#reset-cells': 1,
+      'num-domains': domainCount,
+    },
   );
 }

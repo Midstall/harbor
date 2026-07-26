@@ -92,7 +92,7 @@ const rvF = RiscVExtension(
       ],
     ),
     // Fused multiply-add (R4-type, single precision). opcode distinguishes the
-    // four ops; fmt=00 (matchMask on bits[26:25]) selects single. Three FP source
+    // four ops. fmt=00 (matchMask on bits[26:25]) selects single. Three FP source
     // reads (rs1/rs2/rs3) feed the fused op rd = +-(rs1*rs2) +- rs3.
     RiscVOperation(
       mnemonic: 'fmadd.s',

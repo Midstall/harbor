@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// SPI master/slave controller.
 ///
@@ -17,7 +18,10 @@ import '../soc/device_tree.dart';
 ///
 /// Supports both master and slave mode. CPOL/CPHA configurable.
 class HarborSpiController extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -250,5 +254,14 @@ class HarborSpiController extends BridgeModule
       '#address-cells': 1,
       '#size-cells': 0,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'SPI',
+    groupName: 'SPI',
+    description: 'SPI master and slave controller',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

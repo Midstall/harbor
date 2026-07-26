@@ -35,7 +35,7 @@ typedef HarborFiberTask = Future<void> Function();
 /// each phase concurrently, proceeding through phases in order.
 ///
 /// Tasks within the same phase that depend on each other coordinate
-/// via [HarborHandle]s - a task awaiting a HarborHandle suspends until another
+/// via [HarborHandle]s: a task awaiting a HarborHandle suspends until another
 /// task loads it.
 class HarborFiber {
   final Map<HarborFiberPhase, List<HarborFiberTask>> _tasks = {

@@ -4,11 +4,11 @@ import '../micro_op.dart';
 import '../operation.dart';
 import '../resource.dart';
 
-/// V extension - Vector operations.
+/// V extension: Vector operations.
 ///
 /// Core vector arithmetic and memory operations. The vector unit
 /// is parameterized by VLEN (vector register width) at elaboration
-/// time. Operations here define encoding and resource usage;
+/// time. Operations here define encoding and resource usage,
 /// the actual vector execution logic is CPU-specific.
 const rvV = RiscVExtension(
   name: 'V',
@@ -76,7 +76,7 @@ const rvV = RiscVExtension(
       microcode: [RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4)],
     ),
 
-    // Integer arithmetic (VX - vector-scalar)
+    // Integer arithmetic (VX: vector-scalar)
     RiscVOperation(
       mnemonic: 'vadd.vx',
       opcode: vectorOpcode,
@@ -94,7 +94,7 @@ const rvV = RiscVExtension(
       microcode: [RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4)],
     ),
 
-    // Integer arithmetic (VI - vector-immediate)
+    // Integer arithmetic (VI: vector-immediate)
     RiscVOperation(
       mnemonic: 'vadd.vi',
       opcode: vectorOpcode,

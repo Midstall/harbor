@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// Reset source that can trigger a system reset.
 enum HarborResetSource {
@@ -39,7 +40,10 @@ enum HarborResetSource {
 /// - 0x14: WDOG_RST_EN (enable watchdog as reset source)
 /// - 0x18: SW_RST_KEY  (write 0xDEAD to trigger software reset)
 class HarborResetController extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -245,5 +249,14 @@ class HarborResetController extends BridgeModule
       '#reset-cells': 1,
       'num-domains': domainCount,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'RESET',
+    groupName: 'RESET',
+    description: 'System reset controller',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

@@ -8,6 +8,7 @@ import '../bus/bus_slave_port.dart';
 import '../pdk/pdk_provider.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 import '../soc/target.dart';
 
 /// Temperature sensor source backend.
@@ -24,7 +25,7 @@ enum HarborTemperatureSource {
   /// Lattice ECP5 DTR primitive.
   ecp5Dtr,
 
-  /// External - user provides raw input signals directly.
+  /// External: user provides raw input signals directly.
   external_,
 }
 
@@ -50,7 +51,10 @@ enum HarborTemperatureSource {
 /// - 0x18: INT_STATUS (read/write-1-to-clear)
 /// - 0x1C: INT_ENABLE (read/write, interrupt enable mask)
 class HarborTemperatureSensor extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -157,7 +161,7 @@ class HarborTemperatureSensor extends BridgeModule
 
       case HarborTemperatureSource.ecp5Dtr:
         dtr = Ecp5Dtr(name: 'dtr_temp');
-        // Pulse STARTPULSE periodically - use a simple counter
+        // Pulse STARTPULSE periodically. Use a simple counter
         final startPulse = Logic(name: 'dtr_start');
         final dtrCounter = Logic(name: 'dtr_counter', width: 20);
         Sequential(clk, [
@@ -337,5 +341,14 @@ class HarborTemperatureSensor extends BridgeModule
       '#thermal-sensor-cells': 0,
       'harbor,source': source.name,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'TEMP',
+    groupName: 'TEMP',
+    description: 'On-die temperature sensor',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

@@ -2,7 +2,7 @@ import '../bus/bus.dart';
 import '../util/pretty_string.dart';
 import 'cpu.dart';
 
-/// A device tree node - an immutable value object describing a device's
+/// A device tree node: an immutable value object describing a device's
 /// presence in the device tree.
 ///
 /// Devices don't extend this directly. Instead, they implement
@@ -14,7 +14,7 @@ class HarborDeviceTreeNode with HarborPrettyString {
   /// Most-specific first, with generic fallbacks after. Linux
   /// matches the first compatible string it has a driver for.
   ///
-  /// Example: `['harbor,sdhci', 'sdhci']` - Linux tries the
+  /// Example: `['harbor,sdhci', 'sdhci']`. Linux tries the
   /// harbor-specific driver first, falls back to generic SDHCI.
   final List<String> compatible;
 
@@ -113,6 +113,19 @@ mixin HarborDeviceTreeNodeProvider {
   HarborDeviceTreeNode get dtNode;
 }
 
+/// Interface for devices that back usable system RAM (DRAM, etc.).
+///
+/// Their spans are emitted as root `memory@<addr>` nodes carrying
+/// `device_type = "memory"`, which is where an OS/SBI payload looks for RAM,
+/// rather than as an MMIO peripheral under `/soc`. A device implementing this
+/// may still be a [HarborDeviceTreeNodeProvider] for its control-register
+/// window, the two describe different resources.
+mixin HarborSystemMemoryProvider {
+  /// The usable RAM span(s) this device backs. Excludes any control-register
+  /// window, matching the ACPI memory view.
+  List<BusAddressRange> get systemMemory;
+}
+
 /// Generates a Linux/U-Boot compatible `.dts` file from a list of
 /// [HarborDeviceTreeNodeProvider] peripherals and [HarborCpu] entries.
 ///
@@ -143,6 +156,18 @@ class HarborDeviceTreeGenerator {
   /// Peripheral nodes implementing [HarborDeviceTreeNodeProvider].
   final List<HarborDeviceTreeNodeProvider> peripherals;
 
+  /// Usable system RAM spans, emitted as root `memory@<addr>` nodes with
+  /// `device_type = "memory"`. Without these an OS/SBI payload finds no RAM.
+  final List<BusAddressRange> memories;
+
+  /// Interrupt numbers assigned to peripherals by the SoC's allocator, keyed
+  /// by provider.
+  ///
+  /// When a provider has an entry here it overrides the node's own
+  /// [HarborDeviceTreeNode.interrupts], so interrupt numbering lives in one
+  /// place rather than being hardcoded per peripheral.
+  final Map<HarborDeviceTreeNodeProvider, List<int>> interrupts;
+
   const HarborDeviceTreeGenerator({
     required this.model,
     required this.compatible,
@@ -150,16 +175,27 @@ class HarborDeviceTreeGenerator {
     this.sizeCells = 1,
     this.cpus = const [],
     this.peripherals = const [],
+    this.memories = const [],
+    this.interrupts = const {},
   });
 
   /// All device tree nodes from the peripherals.
   List<HarborDeviceTreeNode> get nodes =>
       peripherals.map((p) => p.dtNode).toList();
 
+  /// Encodes [value] as [cells] 32-bit device-tree cells, most-significant
+  /// first (big-endian cell order), e.g. cells=2 -> `0x<hi> 0x<lo>`.
+  static String _regCells(int value, int cells) {
+    final parts = <String>[];
+    for (var i = cells - 1; i >= 0; i--) {
+      parts.add('0x${((value >> (32 * i)) & 0xffffffff).toRadixString(16)}');
+    }
+    return parts.join(' ');
+  }
+
   /// Generates the DTS source as a string.
   String generate() {
     final buf = StringBuffer();
-    final dtNodes = nodes;
 
     buf.writeln('/dts-v1/;');
     buf.writeln();
@@ -187,13 +223,33 @@ class HarborDeviceTreeGenerator {
         if (cpu.clockFrequency != null) {
           buf.writeln('            clock-frequency = <${cpu.clockFrequency}>;');
         }
+        if (cpu.timebaseFrequency != null) {
+          buf.writeln(
+            '            timebase-frequency = <${cpu.timebaseFrequency}>;',
+          );
+        }
         buf.writeln('            status = "okay";');
         buf.writeln('        };');
       }
       buf.writeln('    };');
     }
 
-    if (dtNodes.isNotEmpty) {
+    for (final region in memories) {
+      buf.writeln();
+      buf.writeln('    memory@${region.start.toRadixString(16)} {');
+      buf.writeln('        device_type = "memory";');
+      // The memory node is a root child, so its reg is encoded in the ROOT's
+      // #address-cells/#size-cells. RV64 SoCs use 2/2 (64-bit base+size), a
+      // parser that reads 64-bit cells (e.g. Ferrite's SBI dtb.parseMemory) then
+      // sees the right span. Emit exactly [addressCells] + [sizeCells] cells.
+      buf.writeln(
+        '        reg = <${_regCells(region.start, addressCells)} '
+        '${_regCells(region.size, sizeCells)}>;',
+      );
+      buf.writeln('    };');
+    }
+
+    if (peripherals.isNotEmpty) {
       buf.writeln();
       buf.writeln('    soc {');
       buf.writeln('        compatible = "simple-bus";');
@@ -201,14 +257,16 @@ class HarborDeviceTreeGenerator {
       buf.writeln('        #size-cells = <$sizeCells>;');
       buf.writeln('        ranges;');
 
-      for (final node in dtNodes) {
+      for (final p in peripherals) {
+        final node = p.dtNode;
+        final irqList = interrupts[p] ?? node.interrupts;
         buf.writeln();
         buf.writeln('        ${node.nodeName} {');
         final compatStr = node.compatible.map((c) => '"$c"').join(', ');
         buf.writeln('            compatible = $compatStr;');
         buf.writeln(
-          '            reg = <0x${node.reg.start.toRadixString(16)} '
-          '0x${node.reg.size.toRadixString(16)}>;',
+          '            reg = <${_regCells(node.reg.start, addressCells)} '
+          '${_regCells(node.reg.size, sizeCells)}>;',
         );
 
         if (node.interruptController) {
@@ -218,10 +276,8 @@ class HarborDeviceTreeGenerator {
           );
         }
 
-        if (node.interrupts.isNotEmpty) {
-          final irqs = node.interrupts
-              .map((i) => '0x${i.toRadixString(16)}')
-              .join(' ');
+        if (irqList.isNotEmpty) {
+          final irqs = irqList.map((i) => '0x${i.toRadixString(16)}').join(' ');
           buf.writeln('            interrupts = <$irqs>;');
         }
 

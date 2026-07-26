@@ -82,7 +82,7 @@ class HarborFabricSlavePort {
 ///     HarborFabricSlavePort(name: 'uart', addressRange: BusAddressRange(0x10000000, 0x1000)),
 ///     HarborFabricSlavePort(name: 'ddr', addressRange: BusAddressRange(0x80000000, 0x40000000)),
 ///   ],
-/// );
+/// )
 /// ```
 class HarborBusFabric extends BridgeModule {
   /// Interconnect topology.

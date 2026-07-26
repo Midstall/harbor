@@ -45,8 +45,8 @@ class JtagInstruction {
 /// [addInstruction] before build.
 ///
 /// Standard instructions:
-/// - BYPASS (all 1s) - single-bit bypass register
-/// - IDCODE (0x01) - 32-bit device identification
+/// - BYPASS (all 1s): single-bit bypass register
+/// - IDCODE (0x01): 32-bit device identification
 ///
 /// ```dart
 /// final tap = JtagTapController(
@@ -208,10 +208,10 @@ class JtagTapController extends Module {
           ),
           If(stateReg.eq(Const(sIrUpdate, width: 4)), then: [irReg < irShift]),
 
-          // DR operations - bypass
+          // DR operations: bypass
           If(stateReg.eq(Const(sDrShift, width: 4)), then: [bypass < tdi]),
 
-          // DR operations - IDCODE
+          // DR operations: IDCODE
           If(
             stateReg.eq(Const(sDrCapture, width: 4)) &
                 irReg.eq(Const(0x01, width: irWidth)),

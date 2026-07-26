@@ -49,9 +49,15 @@ class RiscVExtension {
     int? funct3,
     int? funct7,
     int? instruction,
+    RiscVMxlen? mxlen,
   }) {
     for (final op in operations) {
-      if (op.matches(opcode, funct3, funct7) &&
+      // Filter by mxlen DURING the search: two ops can share opcode+funct3 and
+      // be distinguished only by XLEN (e.g. c.jal on RV32 vs c.addiw on RV64).
+      // Returning the first field-match and rejecting it later would skip the
+      // valid sibling entirely.
+      if ((mxlen == null || op.isValidFor(mxlen)) &&
+          op.matches(opcode, funct3, funct7) &&
           (instruction == null || op.matchesRaw(instruction))) {
         return op;
       }

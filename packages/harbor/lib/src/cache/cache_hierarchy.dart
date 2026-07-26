@@ -158,19 +158,19 @@ class HarborCoherencyConfig with HarborPrettyString {
 ///
 /// Used in coherency protocol implementations.
 enum HarborCacheLineState {
-  /// Invalid - line not present.
+  /// Invalid: line not present.
   invalid,
 
-  /// Shared - clean, may exist in other caches.
+  /// Shared: clean, may exist in other caches.
   shared,
 
-  /// Exclusive - clean, only copy.
+  /// Exclusive: clean, only copy.
   exclusive,
 
-  /// Modified - dirty, only copy.
+  /// Modified: dirty, only copy.
   modified,
 
-  /// Owned - dirty, may exist as shared in others (MOESI only).
+  /// Owned: dirty, may exist as shared in others (MOESI only).
   owned,
 }
 

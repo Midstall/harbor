@@ -40,11 +40,7 @@ void main() {
   group('WishboneArbiter', () {
     test('creates with single master, grant output exists', () {
       final config = WishboneConfig(addressWidth: 32, dataWidth: 32);
-      final master0 = WishboneInterface(config);
-      final slave = WishboneInterface(config);
-      final clk = Logic(name: 'clk');
-      final reset = Logic(name: 'reset');
-      final arbiter = WishboneArbiter([master0], slave, clk: clk, reset: reset);
+      final arbiter = WishboneArbiter(numMasters: 1, config: config);
       expect(arbiter.grant.width, equals(1));
     });
   });

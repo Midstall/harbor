@@ -8,15 +8,16 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 import '../util/elf_loader.dart';
 
-/// Mask ROM - read-only memory with contents fixed at synthesis time.
+/// Mask ROM: read-only memory with contents fixed at synthesis time.
 ///
 /// Used as the first-stage bootloader (FSBL) entry point. The CPU
 /// resets into the mask ROM, which initializes cache-as-RAM and
 /// loads the next boot stage from flash/DDR.
 ///
-/// Contents are provided as [initialData] - a list of data words
+/// Contents are provided as [initialData], a list of data words
 /// that get synthesized into the ROM fabric (LUT ROM on FPGA,
 /// hardwired gates on ASIC).
 ///
@@ -33,7 +34,10 @@ import '../util/elf_loader.dart';
 /// );
 /// ```
 class HarborMaskRom extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   final int? busDataWidth;
 
   /// Base address in the SoC memory map.
@@ -96,7 +100,7 @@ class HarborMaskRom extends BridgeModule
     final ack = bus.ack;
     final stb = bus.stb;
 
-    // ROM read logic - generates a case statement from initialData
+    // ROM read logic: generates a case statement from initialData
     // that synthesizes as LUT ROM on FPGAs
     Sequential(clk, [
       ack < Const(0),
@@ -288,5 +292,14 @@ class HarborMaskRom extends BridgeModule
       'data-width': dataWidth,
       'depth': initialData.length,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'MASKROM',
+    groupName: 'MASKROM',
+    description: 'Mask ROM with contents fixed at synthesis time',
+    baseAddress: baseAddress,
+    size: size,
   );
 }

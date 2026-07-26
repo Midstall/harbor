@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:rohd/rohd.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 
@@ -17,7 +19,7 @@ sealed class HarborClockRate {
   const HarborClockRate();
 }
 
-/// Fixed clock rate - single frequency, no dynamic scaling.
+/// Fixed clock rate: single frequency, no dynamic scaling.
 class HarborFixedClockRate extends HarborClockRate {
   /// Frequency in Hz.
   final int frequency;
@@ -28,7 +30,7 @@ class HarborFixedClockRate extends HarborClockRate {
   String toString() => '${(frequency / 1e6).toStringAsFixed(1)} MHz';
 }
 
-/// Dynamic clock rate - supports frequency scaling between min and max.
+/// Dynamic clock rate: supports frequency scaling between min and max.
 ///
 /// Used for DVFS (Dynamic Voltage and Frequency Scaling) / turbo mode.
 /// The PLL must support runtime reconfiguration, or multiple PLLs
@@ -76,7 +78,7 @@ class HarborClockConfig with HarborPrettyString {
   /// Human-readable name for this clock domain.
   final String name;
 
-  /// Clock rate - fixed or dynamic.
+  /// Clock rate: fixed or dynamic.
   final HarborClockRate rate;
 
   /// Source clock frequency in Hz (input to PLL).
@@ -85,11 +87,46 @@ class HarborClockConfig with HarborPrettyString {
   /// Whether this is the primary clock (not derived from a PLL).
   final bool isPrimary;
 
+  /// Force a real PLL even when [frequency] equals [sourceFrequency].
+  ///
+  /// Normally a 1:1 ratio short-circuits to the raw input clock (a 1:1 PLL is
+  /// pointless and costs a hard PLL block). But an ECP5 DDR PHY needs its edge
+  /// clock (ECLK) to come from a PLL output (CLKOP): nextpnr only assigns the
+  /// dedicated ECLK network to a PLL/clock-tree source, not a raw I/O pad, so a
+  /// raw-pad-fed ECLKSYNCB fails to route ("no route found" for the edge-clock
+  /// source). Setting this on the same-rate DDR domain makes the generator emit
+  /// a CLKOP at the source rate on a real clock network, the litex ECP5DDRPHY
+  /// structure. Ignored when [isPrimary].
+  final bool forcePll;
+
+  /// Optional CLKOS secondary clock derived from the SAME PLL as this domain.
+  ///
+  /// When set, this domain is the PLL primary (CLKOP) and the named secondary
+  /// is a CLKOS output off the SAME VCO, sharing one EHXPLLL and one LOCK. This
+  /// exists because a SECOND EHXPLLL on the ECP5 may not lock on silicon (the
+  /// 2nd PLL site's clock-input routing): collapsing two related clocks (e.g. a
+  /// 144 MHz DDR CK and a 24 MHz core) into one PLL avoids that failure. The
+  /// VCO is `frequency * CLKOP_DIV` and must be an integer multiple of the
+  /// secondary frequency (e.g. 144*4 = 576 MHz, 576/24 = 24). The generator
+  /// emits both domains, see [HarborClockGenerator.createDomainWithSecondary].
+  final ({String name, int frequency})? coClkosSecondary;
+
+  /// Run this domain off the shared Xilinx DDR3-fast clock tree's spare core
+  /// CLKOUT instead of a dedicated PLL/MMCM. On a single-oscillator board (Arty
+  /// S7) a second MMCM on the raw clock pin cannot share the pin's one dedicated
+  /// clock-capable route, so the core clock is folded onto a spare output of the
+  /// DDR MMCM. When set, [HarborSoC] must be built with an `xilinxDdr3Tree` spec.
+  /// The domain is then clocked by that tree's `coreClk`. Ignored otherwise.
+  final bool providedByDdr3Tree;
+
   const HarborClockConfig({
     required this.name,
     required this.rate,
     this.sourceFrequency,
     this.isPrimary = false,
+    this.forcePll = false,
+    this.coClkosSecondary,
+    this.providedByDdr3Tree = false,
   });
 
   /// Convenience factory for fixed-frequency clocks.
@@ -98,11 +135,13 @@ class HarborClockConfig with HarborPrettyString {
     required int frequency,
     int? sourceFrequency,
     bool isPrimary = false,
+    bool forcePll = false,
   }) => HarborClockConfig(
     name: name,
     rate: HarborFixedClockRate(frequency),
     sourceFrequency: sourceFrequency,
     isPrimary: isPrimary,
+    forcePll: forcePll,
   );
 
   /// Convenience factory for dynamic-frequency clocks.
@@ -274,6 +313,50 @@ class HarborClockGenerator {
   ///
   /// If [HarborClockConfig.isPrimary] is true, passes through the input clock.
   /// Otherwise, instantiates a PLL for the target device.
+  /// Creates a domain driven by an already-generated [providedClk] (e.g. a
+  /// spare CLKOUT of another MMCM's clock tree) instead of instantiating a
+  /// dedicated PLL/MMCM. The domain reset is re-synchronised into [providedClk]
+  /// exactly like [createDomain]. Used to run the core off the shared Xilinx
+  /// DDR3-fast clock tree on a single-oscillator board, where a second MMCM on
+  /// the raw clock pin cannot share the pin's one dedicated clock route.
+  HarborClockDomain createDomainFromClock(
+    HarborClockConfig config,
+    Logic providedClk, {
+    Logic? locked,
+  }) {
+    // Reset hold until the providing PLL is up, BELT-AND-SUSPENDERS: release on
+    // (PLL LOCKED) OR (a fixed fallback timer expires), whichever comes first.
+    // The HW-verified UberDDR3 openXC7 flow gates on PLL LOCKED, but whether
+    // LOCKED physically reaches the fabric is PLACEMENT-DEPENDENT on openXC7's
+    // lenient router (some netlists route it, some silently do not. A pure
+    // LOCKED gate then hangs that build in reset forever even though the clock
+    // is fine). So ALSO run an 18-bit counter (131072 cycles, ~1.3 ms at 100 MHz,
+    // comfortably past the ~100 us lock) on the RAW input clock (stable once the
+    // clock pin's IOSTANDARD matches its bank. A clock pin in a DDR3 1.35 V bank
+    // MUST be SSTL135, not LVCMOS33): if LOCKED never arrives, the timer releases
+    // anyway. The release is re-synchronised onto [providedClk]. No counter reset.
+    // The FPGA INIT=0 power-up value initialises it.
+    final lockCnt = Logic(name: '${config.name}_provLockCnt', width: 18);
+    Sequential(inputClk, [
+      If(~lockCnt[17], then: [lockCnt < lockCnt + 1]),
+    ]);
+    final timerHold = ~lockCnt[17];
+    // Assert while NOT-locked AND timer-not-expired => release on LOCKED or timer.
+    final assertSrc = (locked != null ? (~locked & timerHold) : timerHold)
+        .named('${config.name}_provResetHold');
+    // [inputReset] (the raw-pin POR counter) is intentionally NOT mixed in: the
+    // timer above already covers power-up, and dropping it lets that POR counter
+    // DCE so the raw pin feeds ONLY the PLL (the UberDDR3 arrangement).
+    final domain = HarborClockDomain(
+      config: config,
+      clk: providedClk,
+      reset: _domainReset(providedClk, assertSrc, config.name),
+      locked: locked,
+    );
+    _domains.add(domain);
+    return domain;
+  }
+
   HarborClockDomain createDomain(HarborClockConfig config) {
     if (config.isPrimary) {
       final domain = HarborClockDomain(
@@ -294,8 +377,10 @@ class HarborClockGenerator {
 
     // No frequency change: pass the source clock through directly. A 1:1 PLL
     // is pointless, costs a hard PLL block, and on iCE40 conflicts with placing
-    // the clock-input pad.
-    if (config.frequency == sourceFreq) {
+    // the clock-input pad. EXCEPTION: [forcePll] keeps the PLL even at 1:1
+    // (the ECP5 DDR edge clock must be a PLL/CLKOP source, not a raw pad, for
+    // nextpnr to assign the dedicated ECLK network).
+    if (config.frequency == sourceFreq && !config.forcePll) {
       final domain = HarborClockDomain(
         config: config,
         clk: inputClk,
@@ -307,7 +392,7 @@ class HarborClockGenerator {
 
     final t = target;
     if (t == null) {
-      // No target - just pass through (simulation mode)
+      // No target: just pass through (simulation mode)
       final domain = HarborClockDomain(
         config: config,
         clk: inputClk,
@@ -380,11 +465,31 @@ class HarborClockGenerator {
     return domain;
   }
 
+  /// ECP5 EHXPLLL divider selection for self-feedback (CLKFB driven by CLKOP).
+  ///
+  /// At lock fCLKOP = sourceFreq * CLKFB_DIV / CLKI_DIV, and the VCO
+  /// fVCO = fCLKOP * CLKOP_DIV must land in the ECP5 400-800 MHz band. The
+  /// output:input ratio is realized as a reduced integer fraction (CLKFB_DIV :
+  /// CLKI_DIV) so the PLL can divide DOWN as well as up: targetFreq below
+  /// sourceFreq needs CLKI_DIV > 1, which the old code (CLKI_DIV hardcoded to 1)
+  /// could not express, so a 48->24 request produced a 1:1 PLL whose VCO landed
+  /// at 1584 MHz (out of range, never locks).
+  static ({int clkiDiv, int clkfbDiv, int clkopDiv}) ecp5PllDividers(
+    int sourceFreq,
+    int targetFreq,
+  ) {
+    final g = targetFreq.gcd(sourceFreq);
+    final clkfbDiv = (targetFreq ~/ g).clamp(1, 128);
+    final clkiDiv = (sourceFreq ~/ g).clamp(1, 128);
+    final clkopDiv = (600000000 ~/ targetFreq).clamp(1, 128);
+    return (clkiDiv: clkiDiv, clkfbDiv: clkfbDiv, clkopDiv: clkopDiv);
+  }
+
   HarborClockDomain _createEcp5Pll(HarborClockConfig config, int sourceFreq) {
-    final ratio = config.frequency / sourceFreq;
-    final clkfbDiv = (ratio * 1).round().clamp(1, 128);
-    final clkiDiv = 1;
-    final clkopDiv = (800000000 ~/ config.frequency).clamp(1, 128);
+    final dividers = ecp5PllDividers(sourceFreq, config.frequency);
+    final clkiDiv = dividers.clkiDiv;
+    final clkfbDiv = dividers.clkfbDiv;
+    final clkopDiv = dividers.clkopDiv;
 
     // Self-feedback: CLKFB driven by CLKOP
     final feedback = Logic(name: '${config.name}_pll_fb');
@@ -414,13 +519,201 @@ class HarborClockGenerator {
     return domain;
   }
 
+  /// CLKOS divider for a secondary ECP5 output sharing CLKOP's VCO.
+  ///
+  /// The VCO runs at `primaryFreq * CLKOP_DIV`. CLKOS is that divided by the
+  /// returned value. For 25 MHz in, 125 MHz primary (CLKOP_DIV 4 -> VCO
+  /// 500 MHz), a 25 MHz secondary needs CLKOS_DIV 20.
+  static int ecp5ClkosDiv(int sourceFreq, int primaryFreq, int secondaryFreq) {
+    final dividers = ecp5PllDividers(sourceFreq, primaryFreq);
+    final vco = primaryFreq * dividers.clkopDiv;
+    return (vco / secondaryFreq).round();
+  }
+
+  /// Solves a Xilinx 7-series MMCME2 for two related outputs off one VCO:
+  /// CLKOUT0 = primary (fractional, 0.125 steps), CLKOUT1 = secondary (integer).
+  /// Searches CLKFBOUT_MULT_F (2..64, /8) x DIVCLK_DIVIDE (1..8) keeping the VCO
+  /// in the 600-1200 MHz band and the PFD (fin/D) in 10-450 MHz, then picks the
+  /// divide pair with the least combined relative frequency error. Throws if no
+  /// in-band solution exists (bad source/target combination).
+  static ({double mult, int divclk, double out0, int out1}) _mmcmDualSolve(
+    int fin,
+    int primary,
+    int secondary,
+  ) {
+    var bestScore = double.infinity;
+    var bMult = 0.0;
+    var bDiv = 1;
+    var bOut0 = 1.0;
+    var bOut1 = 1;
+    for (var d = 1; d <= 8; d++) {
+      final pfd = fin / d;
+      if (pfd < 10e6 || pfd > 450e6) continue;
+      for (var m8 = 16; m8 <= 512; m8++) {
+        final m = m8 / 8.0;
+        final vco = fin * m / d;
+        if (vco < 600e6 || vco > 1200e6) continue;
+        final o0 = ((vco / primary) * 8).round() / 8.0;
+        if (o0 < 1.0 || o0 > 128.0) continue;
+        final o1 = (vco / secondary).round();
+        if (o1 < 1 || o1 > 128) continue;
+        final pErr = (vco / o0 - primary).abs() / primary;
+        final sErr = (vco / o1 - secondary).abs() / secondary;
+        final score = pErr + sErr;
+        if (score < bestScore) {
+          bestScore = score;
+          bMult = m;
+          bDiv = d;
+          bOut0 = o0;
+          bOut1 = o1;
+        }
+      }
+    }
+    if (bMult == 0.0) {
+      throw StateError(
+        'No MMCME2 solution for fin=$fin primary=$primary secondary=$secondary '
+        '(VCO 600-1200 MHz unreachable).',
+      );
+    }
+    return (mult: bMult, divclk: bDiv, out0: bOut0, out1: bOut1);
+  }
+
+  /// Creates a [config] clock domain plus a [secondaryFrequency] clock derived
+  /// from the SAME PLL. On ECP5 this is one EHXPLLL driving CLKOP (primary) and
+  /// CLKOS (secondary) off a shared VCO, with a single lock signal, so a design
+  /// needing two related clocks (e.g. a 125 MHz pixel-serializer clock and its
+  /// 25 MHz pixel clock) spends one PLL block instead of two.
+  ///
+  /// ECP5 only. With no target (simulation) both pass the input clock through.
+  ({HarborClockDomain primary, HarborClockDomain secondary})
+  createDomainWithSecondary(
+    HarborClockConfig config, {
+    required int secondaryFrequency,
+    String? secondaryName,
+  }) {
+    final secName = secondaryName ?? '${config.name}_s';
+    final secConfig = HarborClockConfig.fixed(
+      name: secName,
+      frequency: secondaryFrequency,
+      sourceFrequency: config.sourceFrequency,
+    );
+
+    final t = target;
+    if (t == null) {
+      final p = HarborClockDomain(
+        config: config,
+        clk: inputClk,
+        reset: _domainReset(inputClk, inputReset, config.name),
+      );
+      final s = HarborClockDomain(
+        config: secConfig,
+        clk: inputClk,
+        reset: _domainReset(inputClk, inputReset, secName),
+      );
+      _domains
+        ..add(p)
+        ..add(s);
+      return (primary: p, secondary: s);
+    }
+
+    // Xilinx 7-series: TWO separate single-output MMCMs (each CLKOUT0), one per
+    // domain. A single dual-output MMCM (CLKOUT0 primary + CLKOUT1 secondary) is
+    // NOT used: the open nextpnr-xilinx / prjxray FASM backend does not
+    // configure the second MMCM output, so CLKOUT1 comes out dead (core held in
+    // reset, silent bring-up). Two MMCMs cost more (the 7S50 has plenty) but each
+    // uses the proven CLKOUT0 path from _createXilinxPll. The two domains cross
+    // through a CDC anyway, so a shared VCO buys nothing here.
+    if (t is HarborFpgaTarget &&
+        (t.vendor == HarborFpgaVendor.vivado ||
+            t.vendor == HarborFpgaVendor.openXc7)) {
+      if (config.sourceFrequency == null) {
+        throw ArgumentError('Clock "${config.name}" requires sourceFrequency');
+      }
+      final primaryX = _createXilinxPll(config, config.sourceFrequency!);
+      final secondaryX = _createXilinxPll(
+        secConfig,
+        secConfig.sourceFrequency!,
+      );
+      return (primary: primaryX, secondary: secondaryX);
+    }
+
+    if (t is! HarborFpgaTarget || t.vendor != HarborFpgaVendor.ecp5) {
+      throw UnsupportedError(
+        'createDomainWithSecondary is implemented for ECP5 and Xilinx '
+        '(got ${t.runtimeType}).',
+      );
+    }
+
+    final sourceFreq = config.sourceFrequency;
+    if (sourceFreq == null) {
+      throw ArgumentError('Clock "${config.name}" requires sourceFrequency');
+    }
+
+    final dividers = ecp5PllDividers(sourceFreq, config.frequency);
+    final clkosDiv = ecp5ClkosDiv(
+      sourceFreq,
+      config.frequency,
+      secondaryFrequency,
+    );
+
+    final feedback = Logic(name: '${config.name}_pll_fb');
+    final pll = Ecp5Ehxplll(
+      clkiDiv: dividers.clkiDiv,
+      clkfbDiv: dividers.clkfbDiv,
+      clkopDiv: dividers.clkopDiv,
+      clk: inputClk,
+      clkfb: feedback,
+      clkosDiv: clkosDiv,
+      // CLKOS_CPHASE ~= CLKOS_DIV/2 gives a centered 50%-duty 0-degree output,
+      // matching the CLKOP convention. Leaving it at the default 0 produces a
+      // degenerate CLKOS edge so the secondary domain's flops never clock and
+      // that whole domain is dead: the cause of the silent single-PLL bring-up.
+      // TEMP PHASE-SWEEP: HARBOR_CLKOS_CPHASE overrides the secondary (core/sys)
+      // clock phase in VCO steps (0..CLKOS_DIV-1) to tune the mesochronous
+      // core<->sclk crossing off a bad phase (#144). Wrapped into range, the
+      // degenerate 0 is bumped to 1. Default stays CLKOS_DIV/2.
+      clkosCphase: (() {
+        final ov = int.tryParse(
+          Platform.environment['HARBOR_CLKOS_CPHASE'] ?? '',
+        );
+        if (ov == null) return clkosDiv ~/ 2;
+        final w = ((ov % clkosDiv) + clkosDiv) % clkosDiv;
+        return w == 0 ? 1 : w;
+      })(),
+      name: '${config.name}_pll',
+    );
+    feedback <= pll.output('CLKOP');
+    final lock = pll.output('LOCK');
+
+    final primary = HarborClockDomain(
+      config: config,
+      clk: pll.output('CLKOP'),
+      reset: _domainReset(pll.output('CLKOP'), inputReset | ~lock, config.name),
+      locked: lock,
+    );
+    final secondary = HarborClockDomain(
+      config: secConfig,
+      clk: pll.output('CLKOS'),
+      reset: _domainReset(pll.output('CLKOS'), inputReset | ~lock, secName),
+      locked: lock,
+    );
+    _domains
+      ..add(primary)
+      ..add(secondary);
+    return (primary: primary, secondary: secondary);
+  }
+
   HarborClockDomain _createXilinxPll(HarborClockConfig config, int sourceFreq) {
     final periodNs = 1e9 / sourceFreq;
-    final ratio = config.frequency / sourceFreq;
-    // MMCM: fout = fin * CLKFBOUT_MULT / (DIVCLK_DIVIDE * CLKOUTn_DIVIDE)
-    final mult = (ratio * 10).round().clamp(2, 64).toDouble();
-    final outDiv = 10.0;
-    final divClk = 1.0;
+    // MMCM: fout = fin * CLKFBOUT_MULT_F / (DIVCLK_DIVIDE * CLKOUT0_DIVIDE_F).
+    // The VCO (fin*M/D) MUST land in 600-1200 MHz or the MMCM never locks. The
+    // old `mult=ratio*10, outDiv=10` gave VCO=fout*10 (e.g. 480 MHz for 48 MHz,
+    // below the 600 min), so every single-PLL Xilinx clock was silently dead.
+    // Reuse the two-output solver with secondary=primary and take CLKOUT0.
+    final sol = _mmcmDualSolve(sourceFreq, config.frequency, config.frequency);
+    final mult = sol.mult;
+    final outDiv = sol.out0;
+    final divClk = sol.divclk.toDouble();
 
     final mmcm = parent.addSubModule(
       XilinxMmcme2Adv(
@@ -435,21 +728,40 @@ class HarborClockGenerator {
     mmcm.input('CLKIN1').srcConnection! <= inputClk;
     mmcm.input('CLKIN2').srcConnection! <= Const(0);
     mmcm.input('CLKINSEL').srcConnection! <= Const(1);
-    mmcm.input('CLKFBIN').srcConnection! <= mmcm.output('CLKFBOUT');
+    // openXC7 REQUIRES a BUFG in the feedback path (CLKFBOUT -> BUFG -> CLKFBIN),
+    // NOT a direct internal feedback. Silicon-verified: with the direct feedback
+    // nextpnr drops the MMCM or mis-routes CLKFBIN so it never locks (free VCO).
+    // With a BUFG feedback + COMPENSATION ZHOLD it locks and divides exactly.
+    final fbBufg = parent.addSubModule(
+      XilinxBufg(name: '${config.name}_fbbufg'),
+    );
+    fbBufg.input('I').srcConnection! <= mmcm.output('CLKFBOUT');
+    mmcm.input('CLKFBIN').srcConnection! <= fbBufg.output('O');
     mmcm.input('RST').srcConnection! <= Const(0);
     mmcm.input('PWRDWN').srcConnection! <= Const(0);
 
     final bufg = parent.addSubModule(XilinxBufg(name: '${config.name}_bufg'));
     bufg.input('I').srcConnection! <= mmcm.output('CLKOUT0');
 
+    // openXC7 MMCM lock hold. The nextpnr-xilinx + prjxray FASM emits the MMCM
+    // divider and lock/filter tables correctly, but the LOCKED status output
+    // does NOT reach the fabric on silicon (it stays low), so the reset must
+    // NOT gate on it. Doing so holds the core dead forever. Instead hold reset
+    // with a fixed timer on the RAW input clock that comfortably exceeds the
+    // 7-series MMCM lock time (~100 us): a 17-bit counter is 131072 cycles,
+    // ~11 ms at 12 MHz. The core boots only after the MMCM has locked and O is
+    // a clean clock. Mirrors the SoC power-on counter (no reset of its own, the
+    // FPGA INIT=0 power-up value is its initializer).
+    final lockCnt = Logic(name: '${config.name}_mmcmLockCnt', width: 18);
+    Sequential(inputClk, [
+      If(~lockCnt[17], then: [lockCnt < lockCnt + 1]),
+    ]);
+    final lockHold = (~lockCnt[17]).named('${config.name}_mmcmLockHold');
+
     final domain = HarborClockDomain(
       config: config,
       clk: bufg.output('O'),
-      reset: _domainReset(
-        bufg.output('O'),
-        inputReset | ~mmcm.output('LOCKED'),
-        config.name,
-      ),
+      reset: _domainReset(bufg.output('O'), inputReset | lockHold, config.name),
       locked: mmcm.output('LOCKED'),
     );
     _domains.add(domain);

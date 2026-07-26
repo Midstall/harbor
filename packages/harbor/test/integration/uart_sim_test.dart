@@ -84,7 +84,7 @@ void main() {
       // Write THR (word addr 0 when DLAB=0)
       await tb.write(0, 0x55);
 
-      // Wait for TX to start shifting - start bit is low
+      // Wait for TX to start shifting: start bit is low
       var sawLow = false;
       for (var i = 0; i < 100; i++) {
         await tb.waitCycles(1);

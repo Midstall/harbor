@@ -21,6 +21,16 @@ void main() {
         pcie.port('rxp_$i').getsLogic(Const(0));
         pcie.port('rxn_$i').getsLogic(Const(1));
       }
+      // Tie off the unused ECAM port so its inputs are defined.
+      pcie.port('ecam_CYC').getsLogic(Const(0));
+      pcie.port('ecam_STB').getsLogic(Const(0));
+      pcie.port('ecam_WE').getsLogic(Const(0));
+      pcie.port('ecam_ADR').getsLogic(Const(0, width: 26));
+      pcie.port('ecam_DAT_MOSI').getsLogic(Const(0, width: 32));
+      pcie.port('ecam_SEL').getsLogic(Const(0, width: 4));
+      // Tie off the downstream master port response.
+      pcie.port('pcie_m_rdata').getsLogic(Const(0, width: 32));
+      pcie.port('pcie_m_ack').getsLogic(Const(0));
 
       final tb = PeripheralTestBench(pcie);
       await tb.init();
@@ -44,6 +54,16 @@ void main() {
         pcie.port('rxp_$i').getsLogic(Const(0));
         pcie.port('rxn_$i').getsLogic(Const(1));
       }
+      // Tie off the unused ECAM port so its inputs are defined.
+      pcie.port('ecam_CYC').getsLogic(Const(0));
+      pcie.port('ecam_STB').getsLogic(Const(0));
+      pcie.port('ecam_WE').getsLogic(Const(0));
+      pcie.port('ecam_ADR').getsLogic(Const(0, width: 26));
+      pcie.port('ecam_DAT_MOSI').getsLogic(Const(0, width: 32));
+      pcie.port('ecam_SEL').getsLogic(Const(0, width: 4));
+      // Tie off the downstream master port response.
+      pcie.port('pcie_m_rdata').getsLogic(Const(0, width: 32));
+      pcie.port('pcie_m_ack').getsLogic(Const(0));
 
       final tb = PeripheralTestBench(pcie);
       await tb.init();
@@ -67,6 +87,16 @@ void main() {
         pcie.port('rxp_$i').getsLogic(Const(0));
         pcie.port('rxn_$i').getsLogic(Const(1));
       }
+      // Tie off the unused ECAM port so its inputs are defined.
+      pcie.port('ecam_CYC').getsLogic(Const(0));
+      pcie.port('ecam_STB').getsLogic(Const(0));
+      pcie.port('ecam_WE').getsLogic(Const(0));
+      pcie.port('ecam_ADR').getsLogic(Const(0, width: 26));
+      pcie.port('ecam_DAT_MOSI').getsLogic(Const(0, width: 32));
+      pcie.port('ecam_SEL').getsLogic(Const(0, width: 4));
+      // Tie off the downstream master port response.
+      pcie.port('pcie_m_rdata').getsLogic(Const(0, width: 32));
+      pcie.port('pcie_m_ack').getsLogic(Const(0));
 
       final tb = PeripheralTestBench(pcie);
       await tb.init();
@@ -90,6 +120,16 @@ void main() {
         pcie.port('rxp_$i').getsLogic(Const(0));
         pcie.port('rxn_$i').getsLogic(Const(1));
       }
+      // Tie off the unused ECAM port so its inputs are defined.
+      pcie.port('ecam_CYC').getsLogic(Const(0));
+      pcie.port('ecam_STB').getsLogic(Const(0));
+      pcie.port('ecam_WE').getsLogic(Const(0));
+      pcie.port('ecam_ADR').getsLogic(Const(0, width: 26));
+      pcie.port('ecam_DAT_MOSI').getsLogic(Const(0, width: 32));
+      pcie.port('ecam_SEL').getsLogic(Const(0, width: 4));
+      // Tie off the downstream master port response.
+      pcie.port('pcie_m_rdata').getsLogic(Const(0, width: 32));
+      pcie.port('pcie_m_ack').getsLogic(Const(0));
 
       final tb = PeripheralTestBench(pcie);
       await tb.init();
@@ -112,6 +152,16 @@ void main() {
         pcie.port('rxp_$i').getsLogic(Const(0));
         pcie.port('rxn_$i').getsLogic(Const(1));
       }
+      // Tie off the unused ECAM port so its inputs are defined.
+      pcie.port('ecam_CYC').getsLogic(Const(0));
+      pcie.port('ecam_STB').getsLogic(Const(0));
+      pcie.port('ecam_WE').getsLogic(Const(0));
+      pcie.port('ecam_ADR').getsLogic(Const(0, width: 26));
+      pcie.port('ecam_DAT_MOSI').getsLogic(Const(0, width: 32));
+      pcie.port('ecam_SEL').getsLogic(Const(0, width: 4));
+      // Tie off the downstream master port response.
+      pcie.port('pcie_m_rdata').getsLogic(Const(0, width: 32));
+      pcie.port('pcie_m_ack').getsLogic(Const(0));
 
       final tb = PeripheralTestBench(pcie);
       await tb.init();

@@ -2,6 +2,34 @@ import 'package:harbor/harbor.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 import 'package:test/test.dart';
 
+/// Minimal peripheral with a configurable register map and block size, used to
+/// exercise the SoC register validation paths.
+class _RegMockPeripheral extends BridgeModule
+    with HarborDeviceTreeNodeProvider, HarborSvdPeripheralProvider {
+  final HarborDeviceRegisterMap map;
+  final int blockSize;
+
+  _RegMockPeripheral(this.map, this.blockSize, {String? name})
+    : super('RegMock', name: name ?? 'regmock') {
+    createPort('clk', PortDirection.input);
+    createPort('reset', PortDirection.input);
+  }
+
+  @override
+  HarborDeviceTreeNode get dtNode => HarborDeviceTreeNode(
+    compatible: ['test,regmock'],
+    reg: BusAddressRange(0x40000000, blockSize),
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'REGMOCK',
+    baseAddress: 0x40000000,
+    size: blockSize,
+    registers: map,
+  );
+}
+
 void main() {
   group('HarborSoC', () {
     test('creates with peripherals', () {
@@ -52,6 +80,78 @@ void main() {
       expect(dts, contains('sifive,plic-1.0.0'));
     });
 
+    test('generates SVD', () {
+      final soc = HarborSoC(
+        name: 'TestSoC',
+        compatible: 'test,soc-v1',
+        busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
+        svdVendor: 'Midstall',
+        svdVersion: '3.0',
+        cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
+      );
+
+      soc.addPeripheral(HarborClint(baseAddress: 0x02000000));
+      soc.addPeripheral(HarborUart(baseAddress: 0x10000000));
+
+      final svd = soc.generateSvd();
+      expect(svd, contains('<device schemaVersion="1.3"'));
+      expect(svd, contains('<vendor>Midstall</vendor>'));
+      expect(svd, contains('<version>3.0</version>'));
+      expect(svd, contains('<name>TestSoC</name>'));
+      expect(svd, contains('<cpu>'));
+      // CLINT carries a register map, so its registers are emitted.
+      expect(svd, contains('<name>CLINT</name>'));
+      expect(svd, contains('<baseAddress>0x2000000</baseAddress>'));
+      expect(svd, contains('<name>mtime</name>'));
+      // UART register map flows through too.
+      expect(svd, contains('<name>UART</name>'));
+      expect(svd, contains('<name>rbr_thr_dll</name>'));
+    });
+
+    test('allocates interrupt numbers once for all generators', () {
+      final soc = HarborSoC(
+        name: 'TestSoC',
+        compatible: 'test,soc-v1',
+        busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
+      );
+
+      // PLIC is an interrupt controller, so it is not assigned a source.
+      soc.addPeripheral(HarborPlic(baseAddress: 0x0C000000));
+      final uart = soc.addPeripheral(HarborUart(baseAddress: 0x10000000));
+      final gpio = soc.addPeripheral(HarborGpio(baseAddress: 0x10060000));
+
+      final assign = soc.interruptAssignments();
+      expect(assign[uart], equals(1));
+      expect(assign[gpio], equals(2));
+      // The controller is skipped entirely.
+      expect(assign.values, isNot(contains(0)));
+      expect(assign.length, equals(2));
+
+      // The same numbers surface in every generated artifact.
+      final dts = soc.generateDts();
+      expect(dts, contains('interrupts = <0x1>;'));
+      expect(dts, contains('interrupts = <0x2>;'));
+
+      final svd = soc.generateSvd();
+      expect(svd, contains('<value>1</value>'));
+      expect(svd, contains('<value>2</value>'));
+
+      final acpi = soc.generateAcpi();
+      expect(acpi, contains('Interrupt (ResourceConsumer'));
+    });
+
+    test('respects a custom interrupt base', () {
+      final soc = HarborSoC(
+        name: 'TestSoC',
+        compatible: 'test,soc-v1',
+        busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
+        interruptBase: 32,
+      );
+
+      final uart = soc.addPeripheral(HarborUart(baseAddress: 0x10000000));
+      expect(soc.interruptAssignments()[uart], equals(32));
+    });
+
     test('generates Mermaid', () {
       final soc = HarborSoC(
         name: 'TestSoC',
@@ -87,13 +187,74 @@ void main() {
         busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
       );
 
-      // CLINT is 64KB at 0x02000000
-      // PLIC at overlapping address
+      // Two CLINTs at the same base overlap.
       soc.addPeripheral(HarborClint(baseAddress: 0x02000000));
       soc.addPeripheral(HarborClint(baseAddress: 0x02000000, name: 'clint2'));
 
-      // buildFabric should detect the overlap
-      // (needs a master to trigger)
+      expect(soc.validate(), isNotEmpty);
+      expect(soc.buildFabric, throwsStateError);
+    });
+
+    group('validate', () {
+      test('a consistent SoC reports no problems', () {
+        final soc = HarborSoC(
+          name: 'TestSoC',
+          compatible: 'test,soc-v1',
+          busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
+        );
+        soc.addPeripheral(HarborClint(baseAddress: 0x02000000));
+        soc.addPeripheral(HarborUart(baseAddress: 0x10000000));
+
+        expect(soc.validate(), isEmpty);
+      });
+
+      test('flags a register that overflows its address block', () {
+        final soc = HarborSoC(
+          name: 'TestSoC',
+          compatible: 'test,soc-v1',
+          busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
+        );
+        // Block is 0x1000, but the register ends at 0x1002.
+        soc.addPeripheral(
+          _RegMockPeripheral(
+            const HarborDeviceRegisterMap(
+              name: 'regmock',
+              fields: [HarborDeviceField(name: 'big', width: 4, offset: 0xFFE)],
+            ),
+            0x1000,
+          ),
+        );
+
+        final errors = soc.validate();
+        expect(errors, hasLength(1));
+        expect(errors.single, contains("register 'big'"));
+        expect(errors.single, contains('exceeds address block size 0x1000'));
+      });
+
+      test('flags overlapping register fields', () {
+        final soc = HarborSoC(
+          name: 'TestSoC',
+          compatible: 'test,soc-v1',
+          busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
+        );
+        soc.addPeripheral(
+          _RegMockPeripheral(
+            const HarborDeviceRegisterMap(
+              name: 'regmock',
+              fields: [
+                HarborDeviceField(name: 'a', width: 4, offset: 0x0),
+                HarborDeviceField(name: 'b', width: 4, offset: 0x2),
+              ],
+            ),
+            0x1000,
+          ),
+        );
+
+        final errors = soc.validate();
+        expect(errors, hasLength(1));
+        expect(errors.single, contains('REGMOCK:'));
+        expect(errors.single, contains('Overlap'));
+      });
     });
 
     test('target can be set', () {

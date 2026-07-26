@@ -7,13 +7,13 @@ import 'dart:async';
 /// [value] to receive it. A [HarborHandle] can only be loaded once.
 ///
 /// ```dart
-/// final width = HarborHandle<int>();
+/// final width = HarborHandle<int>()
 ///
 /// // Task A (setup phase):
-/// width.load(32);
+/// width.load(32)
 ///
 /// // Task B (build phase):
-/// final w = await width.value; // 32
+/// final w = await width.value // 32
 /// ```
 class HarborHandle<T> {
   final Completer<T> _completer = Completer<T>();

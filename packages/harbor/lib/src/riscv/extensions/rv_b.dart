@@ -89,7 +89,7 @@ RiscVOperation _unary(
   ],
 );
 
-/// Zba - Address generation (shift-add).
+/// Zba: Address generation (shift-add).
 final rvZba = RiscVExtension(
   name: 'Zba',
   key: null,
@@ -142,7 +142,7 @@ final rvZba = RiscVExtension(
   ],
 );
 
-/// Zbb - Basic bit manipulation.
+/// Zbb: Basic bit manipulation.
 final rvZbb = RiscVExtension(
   name: 'Zbb',
   key: null,
@@ -234,7 +234,7 @@ final rvZbb = RiscVExtension(
   ],
 );
 
-/// Zbc - Carry-less multiplication (not in RVA22, placeholder functs).
+/// Zbc: Carry-less multiplication (not in RVA22, placeholder functs).
 final rvZbc = RiscVExtension(
   name: 'Zbc',
   key: null,
@@ -246,7 +246,7 @@ final rvZbc = RiscVExtension(
   ],
 );
 
-/// Zbs - Single-bit operations.
+/// Zbs: Single-bit operations.
 final rvZbs = RiscVExtension(
   name: 'Zbs',
   key: null,
@@ -263,7 +263,7 @@ final rvZbs = RiscVExtension(
   ],
 );
 
-/// Combined B extension - Zba + Zbb + Zbc + Zbs.
+/// Combined B extension: Zba + Zbb + Zbc + Zbs.
 final rvB = RiscVExtension(
   name: 'B',
   key: 'B',

@@ -7,7 +7,7 @@ import '../resource.dart';
 
 const _int = RiscVIntRegFile(32);
 
-/// H extension - Hypervisor.
+/// H extension: Hypervisor.
 ///
 /// Adds hypervisor fence and virtual load/store instructions.
 /// All require hypervisor privilege level.
@@ -179,7 +179,7 @@ const rvH = RiscVExtension(
     ),
 
     // Privilege instructions
-    // sret/wfi share funct7=0x08; disambiguate on rs2 (bits[24:20]) - see the
+    // sret/wfi share funct7=0x08. Disambiguate on rs2 (bits[24:20]), see the
     // matching fix in rv_priv.dart. Without it wfi decoded as sret.
     RiscVOperation(
       mnemonic: 'sret',

@@ -126,5 +126,24 @@ void main() {
       final actual = (12000000 * (divf + 1)) ~/ ((divr + 1) * (1 << divq));
       expect((actual - 48000000).abs(), lessThan(1000000)); // within 1 MHz
     });
+
+    test('ECP5 PLL divides 48 MHz down to 24 MHz with an in-range VCO', () {
+      // The OrangeCrab feeds a 48 MHz oscillator. A 24 MHz core clock needs the
+      // PLL to divide DOWN (CLKI_DIV = 2). The old code hardcoded CLKI_DIV = 1
+      // and produced a 1:1 PLL (CLKOP = 48 MHz, VCO = 1584 MHz, never locks).
+      final d = HarborClockGenerator.ecp5PllDividers(48000000, 24000000);
+      // fCLKOP = sourceFreq * CLKFB_DIV / CLKI_DIV must equal the target.
+      expect(48000000 * d.clkfbDiv / d.clkiDiv, equals(24000000));
+      // fVCO = fCLKOP * CLKOP_DIV must land in the ECP5 400-800 MHz band.
+      final vco = 24000000 * d.clkopDiv;
+      expect(vco, inInclusiveRange(400000000, 800000000));
+    });
+
+    test('ECP5 PLL multiplies 12 MHz up to 48 MHz with an in-range VCO', () {
+      final d = HarborClockGenerator.ecp5PllDividers(12000000, 48000000);
+      expect(12000000 * d.clkfbDiv / d.clkiDiv, equals(48000000));
+      final vco = 48000000 * d.clkopDiv;
+      expect(vco, inInclusiveRange(400000000, 800000000));
+    });
   });
 }

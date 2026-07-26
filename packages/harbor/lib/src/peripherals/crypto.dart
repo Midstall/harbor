@@ -194,7 +194,7 @@ class HarborCryptoUnit extends BridgeModule {
     final result = Logic(name: 'result_reg', width: 64);
     final resultValid = Logic(name: 'result_valid_reg');
 
-    // === Zbkb: brev8 - reverse bits within each byte ===
+    // === Zbkb: brev8, reverse bits within each byte ===
     final brev8Result = Logic(name: 'brev8_result', width: 64);
     final brev8Bytes = <Logic>[];
     for (var b = 0; b < 8; b++) {
@@ -205,7 +205,7 @@ class HarborCryptoUnit extends BridgeModule {
     }
     brev8Result <= brev8Bytes.reversed.toList().swizzle();
 
-    // === Zbkc: clmul - carry-less multiply (lower 64 bits) ===
+    // === Zbkc: clmul, carry-less multiply (lower 64 bits) ===
     // clmul(a, b) = XOR of (a << i) for each bit i where b[i] is set
     final clmulResult = Logic(name: 'clmul_result', width: 64);
     Logic clmulAcc = Const(0, width: 64);
@@ -216,7 +216,7 @@ class HarborCryptoUnit extends BridgeModule {
     }
     clmulResult <= clmulAcc;
 
-    // === Zbkx: xperm8 - byte-granularity lookup ===
+    // === Zbkx: xperm8, byte-granularity lookup ===
     // For each byte of rs2, use it as an index into rs1 bytes
     final xperm8Result = Logic(name: 'xperm8_result', width: 64);
     final xperm8Bytes = <Logic>[];
@@ -236,7 +236,7 @@ class HarborCryptoUnit extends BridgeModule {
     }
     xperm8Result <= xperm8Bytes.swizzle();
 
-    // === Zbkx: xperm4 - nibble-granularity lookup ===
+    // === Zbkx: xperm4, nibble-granularity lookup ===
     final xperm4Result = Logic(name: 'xperm4_result', width: 64);
     final xperm4Nibbles = <Logic>[];
     for (var i = 0; i < 16; i++) {
@@ -253,7 +253,7 @@ class HarborCryptoUnit extends BridgeModule {
     }
     xperm4Result <= xperm4Nibbles.swizzle();
 
-    // === Zkne: AES encrypt - SubBytes on 4 bytes of rs2 ===
+    // === Zkne: AES encrypt, SubBytes on 4 bytes of rs2 ===
     // aes64es: apply S-box to bytes, no MixColumns
     final aesEncBytes = <Logic>[];
     for (var i = 0; i < 8; i++) {
@@ -263,7 +263,7 @@ class HarborCryptoUnit extends BridgeModule {
     }
     final aesEncResult = aesEncBytes.swizzle();
 
-    // === Zknd: AES decrypt - InvSubBytes on 4 bytes of rs2 ===
+    // === Zknd: AES decrypt, InvSubBytes on 4 bytes of rs2 ===
     final aesDecBytes = <Logic>[];
     for (var i = 0; i < 8; i++) {
       aesDecBytes.add(

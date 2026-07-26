@@ -36,6 +36,15 @@ enum RvcImm {
   /// c.lw / c.sw: uimm[5:3|2|6], zero-extended (×4).
   clwsw,
 
+  /// RV64 c.ld / c.sd: uimm[5:3|7:6], zero-extended (×8).
+  cldsd,
+
+  /// RV64 c.ldsp: uimm[5|4:3|8:6], zero-extended (×8).
+  ciLdsp,
+
+  /// RV64 c.sdsp: uimm[5:3|8:6], zero-extended (×8).
+  cssSdsp,
+
   /// c.j / c.jal: offset[11|4|9:8|10|6|7|3:1|5], sign-extended.
   cj,
 
@@ -99,6 +108,12 @@ int decodeRvcImm(RvcImm kind, int inst) {
           (b(5) << 3);
     case RvcImm.clwsw:
       return (bits(12, 10) << 3) | (b(6) << 2) | (b(5) << 6);
+    case RvcImm.cldsd:
+      return (bits(12, 10) << 3) | (bits(6, 5) << 6);
+    case RvcImm.ciLdsp:
+      return (b(12) << 5) | (bits(6, 5) << 3) | (bits(4, 2) << 6);
+    case RvcImm.cssSdsp:
+      return (bits(12, 10) << 3) | (bits(9, 7) << 6);
     case RvcImm.cj:
       return _signExtend(
         (b(12) << 11) |
@@ -221,6 +236,28 @@ Logic rvcImmLogic(RvcImm kind, Logic instr, int xlen) {
         b(12), b(11), b(10), // [5:3]
         b(6), // [2]
         Const(0, width: 2),
+      ].swizzle().zeroExtend(xlen);
+    case RvcImm.cldsd:
+      // uimm[7:6|5:3] high->low, then 3 low zeros.
+      return [
+        b(6), b(5), // [7:6]
+        b(12), b(11), b(10), // [5:3]
+        Const(0, width: 3),
+      ].swizzle().zeroExtend(xlen);
+    case RvcImm.ciLdsp:
+      // uimm[8:6|5|4:3] high->low, then 3 low zeros.
+      return [
+        b(4), b(3), b(2), // [8:6]
+        b(12), // [5]
+        b(6), b(5), // [4:3]
+        Const(0, width: 3),
+      ].swizzle().zeroExtend(xlen);
+    case RvcImm.cssSdsp:
+      // uimm[8:6|5:3] high->low, then 3 low zeros.
+      return [
+        b(9), b(8), b(7), // [8:6]
+        b(12), b(11), b(10), // [5:3]
+        Const(0, width: 3),
       ].swizzle().zeroExtend(xlen);
     case RvcImm.cj:
       return [

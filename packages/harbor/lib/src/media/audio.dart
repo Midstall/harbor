@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// Audio sample format.
 enum HarborAudioFormat {
@@ -110,7 +111,10 @@ enum HarborAudioCodecFormat {
 /// - 0x84: CODEC_STATUS  (codec busy/done/error)
 /// - 0x88: CODEC_CAPS   (supported codecs bitmask, read-only)
 class HarborAudioController extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -536,5 +540,14 @@ class HarborAudioController extends BridgeModule
       'harbor,tx-fifo-depth': txFifoDepth,
       'harbor,rx-fifo-depth': rxFifoDepth,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'AUDIO',
+    groupName: 'AUDIO',
+    description: 'Audio controller',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

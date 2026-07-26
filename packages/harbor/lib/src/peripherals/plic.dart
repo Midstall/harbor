@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// RISC-V Platform-Level Interrupt Controller (PLIC), SiFive-compatible.
 ///
@@ -17,7 +18,10 @@ import '../soc/device_tree.dart';
 ///
 /// Address space: 64 MB (0x4000000).
 class HarborPlic extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   final int? busDataWidth;
   final int sources;
   final int contexts;
@@ -247,5 +251,14 @@ class HarborPlic extends BridgeModule
       'interrupt-controller': true,
       '#interrupt-cells': 1,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'PLIC',
+    groupName: 'PLIC',
+    description: 'RISC-V Platform-Level Interrupt Controller',
+    baseAddress: baseAddress,
+    size: 0x4000000,
   );
 }

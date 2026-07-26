@@ -50,11 +50,8 @@ void main() {
       final tb = PeripheralTestBench(dma);
       await tb.init();
 
-      // CH0 STATUS at word addr = (0x08 + 0) << 5 | 1 = 0x101
-      // Channel 0 registers start at addr where bits [11:5] = 0x08
-      // CH_STATUS is offset 1 within the channel
-      // word addr = (0x08 << 5) | 1 = 0x101
-      final val = await tb.read(0x101);
+      // Channel 0 block = word 8..12. CH_STATUS is word 9.
+      final val = await tb.read(9);
       // After reset: busy=0, complete=0, error=0
       expect(val, equals(0));
 
@@ -69,9 +66,9 @@ void main() {
       final tb = PeripheralTestBench(dma);
       await tb.init();
 
-      // CH0 SRC at word addr = (0x08 << 5) | 2 = 0x102
-      await tb.write(0x102, 0x80000000);
-      final val = await tb.read(0x102);
+      // CH0 SRC is word 10.
+      await tb.write(10, 0x80000000);
+      final val = await tb.read(10);
       expect(val, equals(0x80000000));
 
       await Simulator.endSimulation();
@@ -85,9 +82,9 @@ void main() {
       final tb = PeripheralTestBench(dma);
       await tb.init();
 
-      // CH0 DST at word addr = (0x08 << 5) | 3 = 0x103
-      await tb.write(0x103, 0x90000000);
-      final val = await tb.read(0x103);
+      // CH0 DST is word 11.
+      await tb.write(11, 0x90000000);
+      final val = await tb.read(11);
       expect(val, equals(0x90000000));
 
       await Simulator.endSimulation();
@@ -101,9 +98,9 @@ void main() {
       final tb = PeripheralTestBench(dma);
       await tb.init();
 
-      // CH0 LEN at word addr = (0x08 << 5) | 4 = 0x104
-      await tb.write(0x104, 0x1000);
-      final val = await tb.read(0x104);
+      // CH0 LEN is word 12.
+      await tb.write(12, 0x1000);
+      final val = await tb.read(12);
       expect(val, equals(0x1000));
 
       await Simulator.endSimulation();
@@ -117,10 +114,9 @@ void main() {
       final tb = PeripheralTestBench(dma);
       await tb.init();
 
-      // CH0 CTRL at word addr = (0x08 << 5) | 0 = 0x100
-      // bit 0 = enable
-      await tb.write(0x100, 0x01);
-      final val = await tb.read(0x100);
+      // CH0 CTRL is word 8. Bit 0 = enable.
+      await tb.write(8, 0x01);
+      final val = await tb.read(8);
       expect(val & 0x01, equals(0x01));
 
       await Simulator.endSimulation();

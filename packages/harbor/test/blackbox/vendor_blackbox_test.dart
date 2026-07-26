@@ -23,7 +23,7 @@ void main() {
     });
 
     test('Ecp5Bb creates', () {
-      final bb = Ecp5Bb();
+      final bb = Ecp5Bb(i: Logic(), t: Logic(), b: LogicNet());
       expect(bb, isNotNull);
       expect(bb.definitionName, equals('BB'));
     });

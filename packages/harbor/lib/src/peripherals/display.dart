@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 import '../util/pretty_string.dart';
 
 /// Display output interface type.
@@ -227,7 +228,10 @@ class HarborDisplayConfig with HarborPrettyString {
 /// - 0x20: INT_STATUS (W1C: vblank, underrun)
 /// - 0x24: INT_ENABLE
 class HarborDisplayController extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Display configuration.
   final HarborDisplayConfig config;
 
@@ -317,14 +321,34 @@ class HarborDisplayController extends BridgeModule
     final vSyncStart = vActive + vFp.zeroExtend(12);
     final vSyncEnd = vSyncStart + vSync.zeroExtend(12);
 
-    output('de') <= enable & inHActive & inVActive;
+    final inActive = (enable & inHActive & inVActive).named('in_active');
+    output('de') <= inActive;
     output('hsync') <= hCount.gte(hSyncStart) & hCount.lt(hSyncEnd);
     output('vsync') <= vCount.gte(vSyncStart) & vCount.lt(vSyncEnd);
-    output('pixel_r') <= Const(0, width: 8);
-    output('pixel_g') <= Const(0, width: 8);
-    output('pixel_b') <= Const(0, width: 8);
-    output('fb_addr') <= Const(0, width: 32);
-    output('fb_stb') <= Const(0);
+
+    // Framebuffer fetch: during active video, read the current pixel's word
+    // and drive RGB. Address = base + row*stride + col*bytesPerPixel. This is a
+    // per-pixel combinational fetch in the pixel-clock domain (a real design
+    // prefetches a line into a buffer across the pixel/system clock crossing).
+    final bpp = config.pixelFormat.bitsPerPixel ~/ 8;
+    final fbData = input('fb_data');
+    final lineOff = (vCount.zeroExtend(32) * fbStride.zeroExtend(32)).getRange(
+      0,
+      32,
+    );
+    final colOff = (hCount.zeroExtend(32) * Const(bpp, width: 32)).getRange(
+      0,
+      32,
+    );
+    output('fb_addr') <= (fbBase + lineOff + colOff);
+    output('fb_stb') <= inActive;
+    // 0xXXRRGGBB byte order: R[23:16], G[15:8], B[7:0]. Blanked outside active.
+    output('pixel_r') <=
+        mux(inActive, fbData.getRange(16, 24), Const(0, width: 8));
+    output('pixel_g') <=
+        mux(inActive, fbData.getRange(8, 16), Const(0, width: 8));
+    output('pixel_b') <=
+        mux(inActive, fbData.getRange(0, 8), Const(0, width: 8));
 
     Sequential(pixClk, [
       If(
@@ -500,5 +524,14 @@ class HarborDisplayController extends BridgeModule
       'max-width': config.maxWidth,
       'max-height': config.maxHeight,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'DISPLAY',
+    groupName: 'DISPLAY',
+    description: 'Framebuffer display controller',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

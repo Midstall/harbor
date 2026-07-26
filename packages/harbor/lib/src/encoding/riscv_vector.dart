@@ -4,7 +4,7 @@ import 'bit_struct.dart';
 ///
 /// Per the RISC-V V extension specification v1.0.
 
-/// Vector opcode - all vector instructions use this major opcode.
+/// Vector opcode: all vector instructions use this major opcode.
 const vectorOpcode = 0x57; // OP-V
 
 /// Vector load opcode.

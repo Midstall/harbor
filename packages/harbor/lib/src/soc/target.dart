@@ -46,6 +46,15 @@ class HarborFpgaTarget extends HarborDeviceTarget {
   /// Additional constraints passed to the toolchain.
   final Map<String, String> extraConstraints;
 
+  /// Name of the top-level clock input port, used for the timing constraint in
+  /// the generated constraint file. Defaults to `'clk'`.
+  final String clockPortName;
+
+  /// Optional bitstream programming command for a `prog` Makefile target
+  /// (e.g. `'openFPGALoader -b ulx3s \$(TOP).bit'`). When null, no `prog`
+  /// target is emitted.
+  final String? progCommand;
+
   /// Whether this FPGA supports eFuse OTP storage.
   ///
   /// ECP5 and Spartan 7 have eFuse support for user data and
@@ -83,6 +92,8 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     this.frequency = 0,
     this.pinMap = const {},
     this.extraConstraints = const {},
+    this.clockPortName = 'clk',
+    this.progCommand,
   });
 
   /// iCE40 UP5K target using Yosys + nextpnr-ice40.
@@ -92,6 +103,8 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     this.frequency = 0,
     this.pinMap = const {},
     this.extraConstraints = const {},
+    this.clockPortName = 'clk',
+    this.progCommand,
   }) : name = 'ice40-$device',
        vendor = HarborFpgaVendor.ice40;
 
@@ -102,6 +115,8 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     this.frequency = 0,
     this.pinMap = const {},
     this.extraConstraints = const {},
+    this.clockPortName = 'clk',
+    this.progCommand,
   }) : name = 'ecp5-$device',
        vendor = HarborFpgaVendor.ecp5;
 
@@ -112,6 +127,8 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     this.frequency = 0,
     this.pinMap = const {},
     this.extraConstraints = const {},
+    this.clockPortName = 'clk',
+    this.progCommand,
     bool useOpenXc7 = false,
   }) : name = 'spartan7-$device',
        vendor = useOpenXc7 ? HarborFpgaVendor.openXc7 : HarborFpgaVendor.vivado;
@@ -255,6 +272,14 @@ class HarborFpgaTarget extends HarborDeviceTarget {
       buf.writeln('\t$packCmd');
     }
 
+    // Bitstream programming (loads the board over USB/JTAG).
+    if (progCommand != null) {
+      buf.writeln();
+      buf.writeln('.PHONY: prog');
+      buf.writeln('prog: all');
+      buf.writeln('\t$progCommand');
+    }
+
     buf.writeln();
     buf.writeln('clean:');
     buf.writeln(
@@ -297,20 +322,63 @@ class HarborFpgaTarget extends HarborDeviceTarget {
       buf.writeln('set_io ${entry.key} ${_site(entry.value)}');
     }
     if (frequency > 0) {
-      final clkPin = pinMap['clk'];
+      final clkPin = pinMap[clockPortName];
       if (clkPin != null) {
-        buf.writeln('set_frequency clk ${frequency / 1e6}');
+        buf.writeln('set_frequency $clockPortName ${frequency / 1e6}');
       }
     }
     return buf.toString();
   }
 
+  /// ECP5 CSFBGA285 ball -> I/O bank, for the DDR3 SSTL135 banks only (the rest
+  /// of the package returns null = not a tracked DDR bank). VERIFIED against the
+  /// nextpnr iodb / PnR VREF assignment for the OrangeCrab creek_ddrlevel build:
+  /// "Using pin C15 as VREF for bank 7" and "Using pin H15 as VREF for bank 6" -
+  /// the DQ/DQS input banks are 6 (lane1) and 7 (lane0). VREF is auto-selected by
+  /// nextpnr for SSTL135_I, so only the VCCIO declaration is needed.
+  ///
+  /// Bank 7 carries lane-0 DQ/DQS (balls A13..A17, B13..B17, C16..C17, D15..D16,
+  /// + B15 DQS0, C15 VREF). Bank 6 carries lane-1 DQ/DQS (F15..F18, G15..G18,
+  /// H16, J16, C18, + G18 DQS1, H15 VREF). Mapped by the ball's row letter +
+  /// column band, with the verified per-ball EXCEPTIONS that the row split gets
+  /// wrong (C18 is a bank-6 lane-1 DQ ball, NOT bank 7 despite row C).
+  static int? _ddrBankOf(String ball) {
+    final m = RegExp(r'^([A-Z])(\d+)$').firstMatch(ball);
+    if (m == null) return null;
+    final row = m.group(1)!;
+    final col = int.parse(m.group(2)!);
+    if (col < 13) return null; // cmd/addr (SSTL outputs, no VREF) - not tracked
+    // Verified per-ball exceptions to the row split (from the iodb / litex
+    // OrangeCrab pinout): C18 is a lane-1 DQ ball in bank 6, not bank 7.
+    if (ball == 'C18') return 6;
+    // Right edge, columns 13..18: rows A..D -> bank 7, rows E..L -> bank 6.
+    if ('ABCD'.contains(row)) return 7;
+    if ('EFGHJKL'.contains(row)) return 6;
+    return null;
+  }
+
   String _generateLpf() {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated LPF for $name');
+    // Collect the DDR SSTL135 banks (from the DQ/DQS input pins) so each gets a
+    // single VCCIO declaration. The SSTL135 input threshold is referenced to
+    // VCCIO/2. Without an explicit BANK VCCIO the threshold is left undefined
+    // (litex/Lattice ECP5 DDR3 lpf always sets it). Deduped, emitted once.
+    final ddrBanks = <int>{};
     for (final entry in pinMap.entries) {
       final attrs = _ioAttrs(entry.value);
-      // A bare IO type may be given as the first attribute; anything with
+      final ioType = attrs.where((a) => !a.contains('=')).firstOrNull;
+      if (ioType != null && ioType.startsWith('SSTL135')) {
+        final bank = _ddrBankOf(_site(entry.value));
+        if (bank != null) ddrBanks.add(bank);
+      }
+    }
+    for (final bank in ddrBanks.toList()..sort()) {
+      buf.writeln('BANK $bank VCCIO 1.35 V;');
+    }
+    for (final entry in pinMap.entries) {
+      final attrs = _ioAttrs(entry.value);
+      // A bare IO type may be given as the first attribute. Anything with
       // an '=' passes through verbatim (TERMINATION, DIFFRESISTOR, ...).
       final ioType = attrs.where((a) => !a.contains('=')).firstOrNull;
       final extras = attrs.where((a) => a.contains('=')).join(' ');
@@ -322,7 +390,8 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     }
     if (frequency > 0) {
       buf.writeln(
-        'FREQUENCY PORT "clk" ${(frequency / 1e6).toStringAsFixed(1)} MHz;',
+        'FREQUENCY PORT "$clockPortName" '
+        '${(frequency / 1e6).toStringAsFixed(1)} MHz;',
       );
     }
     return buf.toString();
@@ -334,18 +403,30 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     for (final entry in pinMap.entries) {
       final attrs = _ioAttrs(entry.value);
       final ioStandard = attrs.where((a) => !a.contains('=')).firstOrNull;
+      // No braces around the port name in get_ports: the open-source
+      // nextpnr-xilinx XDC parser rejects `[get_ports {name}]` (asserts on the
+      // brace token), unlike Vivado which accepts either form.
       buf.writeln(
         'set_property -dict {PACKAGE_PIN ${_site(entry.value)} '
         'IOSTANDARD ${ioStandard ?? 'LVCMOS33'}} '
-        '[get_ports {${entry.key}}]',
+        '[get_ports ${entry.key}]',
       );
     }
     if (frequency > 0) {
       final periodNs = 1e9 / frequency;
       buf.writeln(
         'create_clock -period ${periodNs.toStringAsFixed(3)} '
-        '[get_ports {clk}]',
+        '[get_ports $clockPortName]',
       );
+    }
+    // Extra raw XDC lines (values emitted verbatim). Used for openXC7 clock-BEL
+    // placement constraints the auto placer gets wrong, e.g. pinning the DDR3
+    // PHY's regional clock buffers (BUFHCE) into the DDR bank's clock region so
+    // the BUFG->BUFH dedicated arc routes (nextpnr-xilinx otherwise places them
+    // in the wrong clock region and the dedicated clock router rejects the arc).
+    // The key is a label only, the value is the full XDC line.
+    for (final line in extraConstraints.values) {
+      buf.writeln(line);
     }
     return buf.toString();
   }
@@ -573,9 +654,9 @@ class HarborAsicTarget extends HarborDeviceTarget {
   /// Generates an OpenROAD PnR script for a single macro (tile hardening).
   ///
   /// Produces three outputs per macro:
-  /// - `<macro>_final.def` - routed layout
-  /// - `<macro>.lef` - LEF abstract for top-level placement
-  /// - `<macro>.lib` - Liberty timing model for top-level STA
+  /// - `<macro>_final.def`: routed layout
+  /// - `<macro>.lef`: LEF abstract for top-level placement
+  /// - `<macro>.lib`: Liberty timing model for top-level STA
   String generateMacroOpenroadTcl(HarborAsicMacro macro) {
     final lib = provider.standardCellLibrary;
     final m = macro.moduleName;
@@ -786,7 +867,7 @@ class HarborAsicTarget extends HarborDeviceTarget {
       buf.writeln();
     }
 
-    // Routing - skip lower metal layers in hierarchical mode
+    // Routing: skip lower metal layers in hierarchical mode
     if (isHierarchical && topRoutingMinLayer > 1) {
       buf.writeln(
         '# Skip Metal1-${topRoutingMinLayer - 1} '
@@ -824,10 +905,10 @@ class HarborAsicTarget extends HarborDeviceTarget {
 
 /// Supported FPGA vendors / toolchains.
 enum HarborFpgaVendor {
-  /// Lattice iCE40 - Yosys + nextpnr-ice40
+  /// Lattice iCE40: Yosys + nextpnr-ice40
   ice40,
 
-  /// Lattice ECP5 - Yosys + nextpnr-ecp5
+  /// Lattice ECP5: Yosys + nextpnr-ecp5
   ecp5,
 
   /// Xilinx Vivado (proprietary)

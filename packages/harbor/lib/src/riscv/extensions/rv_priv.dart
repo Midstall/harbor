@@ -41,7 +41,15 @@ final rvPriv = RiscVExtension(
       format: rType,
       matchMask: 0x01F00000, // bits[24:20] = rs2
       matchValue: 0x00500000, // rs2 = 0b00101
-      microcode: [RiscVWaitForInterrupt()],
+      // wfi is a hint: wait for interrupt, then RETIRE and advance to pc+4 (so an
+      // interrupt taken while stalled resumes at the instruction after wfi, and
+      // the core never wedges on it). The UpdatePc mirrors Zawrs wrs.nto/wrs.sto,
+      // it was missing here, so wfi never advanced and stalled the dynamic
+      // microcode interpreter (creek) forever.
+      microcode: [
+        RiscVWaitForInterrupt(),
+        RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
+      ],
     ),
   ],
 );

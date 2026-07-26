@@ -19,7 +19,7 @@ void main() {
       final tb = PeripheralTestBench(rom);
       await tb.init();
 
-      // The bus carries byte addresses; word i lives at i*4 (proven on
+      // The bus carries byte addresses. Word i lives at i*4 (proven on
       // hardware: the fetcher issues byte-addressed reads).
       expect(await tb.read(0), equals(0x00000297));
       expect(await tb.read(4), equals(0x02028593));
@@ -41,7 +41,7 @@ void main() {
       // Attempt to write
       await tb.write(0, 0x12345678);
 
-      // Read back - should still be original data
+      // Read back: should still be original data
       final val = await tb.read(0);
       expect(val, equals(0xDEADBEEF));
 

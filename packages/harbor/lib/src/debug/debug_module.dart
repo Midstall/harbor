@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// RISC-V Debug Module (DM) per the RISC-V Debug Specification 1.0.
 ///
@@ -24,7 +25,10 @@ import '../soc/device_tree.dart';
 /// - 0x18: abstractauto 0x20-0x2F: progbuf  0x38: sbcs
 /// - 0x39: sbaddress0   0x3C: sbdata0
 class HarborDebugModule extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address for the debug module's memory-mapped registers.
   final int baseAddress;
 
@@ -252,5 +256,14 @@ class HarborDebugModule extends BridgeModule
       'num-harts': numHarts,
       'progbuf-size': progBufSize,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'DEBUG',
+    groupName: 'DEBUG',
+    description: 'RISC-V debug module',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

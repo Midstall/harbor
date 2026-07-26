@@ -2,53 +2,53 @@
 ///
 /// Per the RISC-V Privileged Architecture specification.
 
-/// Hypervisor instructions - all encoded as SYSTEM (opcode 0x73).
+/// Hypervisor instructions: all encoded as SYSTEM (opcode 0x73).
 ///
 /// These use R-type encoding with funct7 discriminating the operation.
 abstract final class HypervisorFunct7 {
-  /// HFENCE.VVMA - hypervisor fence for VS-stage address translation.
+  /// HFENCE.VVMA: hypervisor fence for VS-stage address translation.
   static const hfenceVvma = 0x11;
 
-  /// HFENCE.GVMA - hypervisor fence for G-stage address translation.
+  /// HFENCE.GVMA: hypervisor fence for G-stage address translation.
   static const hfenceGvma = 0x31;
 
-  /// HLV.B - hypervisor load byte (virtual).
+  /// HLV.B: hypervisor load byte (virtual).
   static const hlvB = 0x30;
 
-  /// HLV.BU - hypervisor load byte unsigned (virtual).
+  /// HLV.BU: hypervisor load byte unsigned (virtual).
   static const hlvBu = 0x30; // distinguished by rs2
 
-  /// HLV.H - hypervisor load halfword (virtual).
+  /// HLV.H: hypervisor load halfword (virtual).
   static const hlvH = 0x32;
 
-  /// HLV.HU - hypervisor load halfword unsigned (virtual).
+  /// HLV.HU: hypervisor load halfword unsigned (virtual).
   static const hlvHu = 0x32; // distinguished by rs2
 
-  /// HLV.W - hypervisor load word (virtual).
+  /// HLV.W: hypervisor load word (virtual).
   static const hlvW = 0x34;
 
-  /// HLV.WU - hypervisor load word unsigned (virtual, RV64).
+  /// HLV.WU: hypervisor load word unsigned (virtual, RV64).
   static const hlvWu = 0x34; // distinguished by rs2
 
-  /// HLV.D - hypervisor load doubleword (virtual, RV64).
+  /// HLV.D: hypervisor load doubleword (virtual, RV64).
   static const hlvD = 0x36;
 
-  /// HSV.B - hypervisor store byte (virtual).
+  /// HSV.B: hypervisor store byte (virtual).
   static const hsvB = 0x31;
 
-  /// HSV.H - hypervisor store halfword (virtual).
+  /// HSV.H: hypervisor store halfword (virtual).
   static const hsvH = 0x33;
 
-  /// HSV.W - hypervisor store word (virtual).
+  /// HSV.W: hypervisor store word (virtual).
   static const hsvW = 0x35;
 
-  /// HSV.D - hypervisor store doubleword (virtual, RV64).
+  /// HSV.D: hypervisor store doubleword (virtual, RV64).
   static const hsvD = 0x37;
 
-  /// HLVX.HU - hypervisor load halfword execute unsigned.
+  /// HLVX.HU: hypervisor load halfword execute unsigned.
   static const hlvxHu = 0x32; // rs2=0x3
 
-  /// HLVX.WU - hypervisor load word execute unsigned.
+  /// HLVX.WU: hypervisor load word execute unsigned.
   static const hlvxWu = 0x34; // rs2=0x3
 }
 
@@ -99,13 +99,13 @@ abstract final class HstatusFields {
   /// Virtual supervisor XLEN (bits 33:32, RV64 only).
   static const vsxlShift = 32;
 
-  /// Virtual TVM (trap virtual memory) - bit 20.
+  /// Virtual TVM (trap virtual memory): bit 20.
   static const vtvmBit = 20;
 
-  /// Virtual TW (timeout wait) - bit 21.
+  /// Virtual TW (timeout wait): bit 21.
   static const vtwBit = 21;
 
-  /// Virtual TSR (trap SRET) - bit 22.
+  /// Virtual TSR (trap SRET): bit 22.
   static const vtsrBit = 22;
 
   /// Virtual guest external interrupt number (bits 17:12).
@@ -133,13 +133,13 @@ abstract final class HypervisorTrap {
   /// Virtual instruction exception.
   static const virtualInstruction = 22;
 
-  /// Guest page fault - fetch.
+  /// Guest page fault: fetch.
   static const guestInstructionPageFault = 20;
 
-  /// Guest page fault - load.
+  /// Guest page fault: load.
   static const guestLoadPageFault = 21;
 
-  /// Guest page fault - store/AMO.
+  /// Guest page fault: store/AMO.
   static const guestStorePageFault = 23;
 }
 

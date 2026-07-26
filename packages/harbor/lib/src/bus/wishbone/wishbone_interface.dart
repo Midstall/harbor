@@ -100,20 +100,18 @@ class WishboneConfig with HarborPrettyString {
 ///   WishboneInterface(config),
 ///   name: 'dataBus',
 ///   role: PairRole.provider,  // master
-/// );
+/// )
 ///
 /// // In a slave BridgeModule:
 /// final bus = addInterface(
 ///   WishboneInterface(config),
 ///   name: 'bus',
 ///   role: PairRole.consumer,  // slave
-/// );
+/// )
 /// ```
 class WishboneInterface extends PairInterface {
   /// The configuration for this interface.
   final WishboneConfig config;
-
-  // -- Master → Slave signals (from provider) --
 
   /// Cycle signal. Asserted for the duration of a bus cycle.
   Logic get cyc => port('CYC');
@@ -133,15 +131,11 @@ class WishboneInterface extends PairInterface {
   /// Byte select.
   Logic get sel => port('SEL');
 
-  // -- Slave → Master signals (from consumer) --
-
   /// Acknowledge. Slave indicates transfer completion.
   Logic get ack => port('ACK');
 
   /// Read data (slave → master).
   Logic get datMiso => port('DAT_MISO');
-
-  // -- Optional signals --
 
   /// Error signal (slave → master). Only present if [WishboneConfig.useErr].
   Logic? get err => tryPort('ERR');

@@ -3,51 +3,55 @@ import 'package:test/test.dart';
 
 void main() {
   group('HarborL1ICache', () {
-    test('creates with default config', () {
+    test('creates direct-mapped with word-wide serve + paced refill', () {
       final cache = HarborL1ICache(
-        config: const HarborCacheConfig(size: 32 * 1024, ways: 4),
+        config: const HarborL1iCacheConfig(size: 4096, ways: 1, lineSize: 8),
+        xlen: 64,
       );
-      expect(cache.reqAddr.width, equals(32));
+      expect(cache.reqAddr.width, equals(64));
       expect(cache.reqValid.width, equals(1));
-      expect(cache.respData.width, equals(64 * 8)); // 64B line
+      // One machine word is served per fetch, not a whole line.
+      expect(cache.respData.width, equals(64));
       expect(cache.respValid.width, equals(1));
       expect(cache.miss.width, equals(1));
+      // Word-granular refill handshake to the MMU ifetch port.
+      expect(cache.memEn.width, equals(1));
+      expect(cache.memAddr.width, equals(64));
+      expect(cache.memRdata.width, equals(64));
     });
 
-    test('refill interface widths match config', () {
-      final cache = HarborL1ICache(
-        config: const HarborCacheConfig(size: 16 * 1024, ways: 2, lineSize: 32),
+    test('rejects set-associative config (direct-mapped only)', () {
+      expect(
+        () => HarborL1ICache(
+          config: const HarborL1iCacheConfig(size: 4096, ways: 2),
+        ),
+        throwsArgumentError,
       );
-      expect(cache.refillData.width, equals(32 * 8)); // 32B line
-      expect(cache.refillAddr.width, equals(32));
     });
   });
 
   group('HarborL1DCache', () {
-    test('creates with store buffer', () {
+    test('creates with word-granular read/write memory port', () {
       final cache = HarborL1DCache(
-        config: const HarborCacheConfig(size: 32 * 1024, ways: 4),
-        hasStoreBuffer: true,
-        storeBufferDepth: 8,
+        config: const HarborL1dCacheConfig(size: 4096, ways: 1, lineSize: 8),
+        xlen: 64,
       );
-      expect(cache.hasStoreBuffer, isTrue);
-      expect(cache.storeBufferDepth, equals(8));
+      expect(cache.reqAddr.width, equals(64));
+      expect(cache.reqWrite.width, equals(1));
+      expect(cache.reqData.width, equals(64));
+      expect(cache.respData.width, equals(64));
+      expect(cache.memWe.width, equals(1));
+      expect(cache.memWdata.width, equals(64));
+      expect(cache.memSize.width, equals(3));
     });
 
-    test('has snoop interface', () {
-      final cache = HarborL1DCache(
-        config: const HarborCacheConfig(size: 32 * 1024, ways: 4),
+    test('rejects set-associative config (direct-mapped only)', () {
+      expect(
+        () => HarborL1DCache(
+          config: const HarborL1dCacheConfig(size: 4096, ways: 2),
+        ),
+        throwsArgumentError,
       );
-      expect(cache.output('snoop_hit').width, equals(1));
-      expect(cache.output('snoop_data').width, equals(64 * 8));
-    });
-
-    test('has writeback interface', () {
-      final cache = HarborL1DCache(
-        config: const HarborCacheConfig(size: 32 * 1024, ways: 4),
-      );
-      expect(cache.output('writeback_addr').width, equals(32));
-      expect(cache.output('writeback_valid').width, equals(1));
     });
   });
 

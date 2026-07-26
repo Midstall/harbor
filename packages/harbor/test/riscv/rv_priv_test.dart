@@ -51,10 +51,13 @@ void main() {
       expect(wfi.funct3, equals(0));
     });
 
-    test('wfi microcode is a single RiscVWaitForInterrupt', () {
+    test('wfi microcode waits then advances pc+4 (NOP-hint retire)', () {
       final wfi = rvPriv.operations.firstWhere((op) => op.mnemonic == 'wfi');
-      expect(wfi.microcode, hasLength(1));
+      expect(wfi.microcode, hasLength(2));
       expect(wfi.microcode.first, isA<RiscVWaitForInterrupt>());
+      final upd = wfi.microcode[1];
+      expect(upd, isA<RiscVUpdatePc>());
+      expect((upd as RiscVUpdatePc).offset, equals(4));
     });
 
     test('all operations use rType format', () {

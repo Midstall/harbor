@@ -90,6 +90,34 @@ void main() {
       await Simulator.endSimulation();
     });
 
+    test(
+      'sub-word byte stores honor SEL and do not clobber neighbors',
+      () async {
+        // Fill all 8 byte lanes of one 64-bit word via 8 separate SEL-masked
+        // stores. Before the sim model honored SEL each store wrote the whole
+        // word, so only the last byte survived (this is exactly what wedged the
+        // maskrom banner: the message read back with one lane set). All 8 must
+        // now coexist.
+        final sram = HarborSram(baseAddress: 0x3000, size: 64, dataWidth: 64);
+        final tb = PeripheralTestBench(sram);
+        await tb.init();
+
+        final bytes = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        for (var lane = 0; lane < 8; lane++) {
+          await tb.write(0, bytes[lane] << (lane * 8), sel: 1 << lane);
+        }
+
+        final val = await tb.read(0);
+        expect(
+          val,
+          equals(0x8877665544332211),
+          reason: 'byte lanes clobbered: ${val.toRadixString(16)}',
+        );
+
+        await Simulator.endSimulation();
+      },
+    );
+
     test('unwritten word reads 0', () async {
       final sram = HarborSram(baseAddress: 0x3000, size: 32);
       final tb = PeripheralTestBench(sram);

@@ -2,7 +2,7 @@ part of 'plugin.dart';
 
 /// A contextual service registry and elaboration engine for plugins.
 ///
-/// Each [PluginHost] is a fully independent context - no global state.
+/// Each [PluginHost] is a fully independent context: no global state.
 /// Multiple hosts can coexist and elaborate in parallel.
 ///
 /// ```dart

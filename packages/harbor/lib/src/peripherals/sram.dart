@@ -3,10 +3,12 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../blackbox/ecp5/ecp5.dart';
 import '../blackbox/ice40/ice40.dart';
+import '../blackbox/xilinx/xilinx.dart';
 import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 import '../soc/target.dart';
 
 /// On-chip SRAM memory module.
@@ -15,12 +17,15 @@ import '../soc/target.dart';
 /// uses a small register array (max 4KB).
 ///
 /// Sub-word stores: the iCE40 SPRAM path honors the bus byte-lane selects
-/// through MASKWREN, and the ECP5 path through one x9 DP16KD per byte lane.
-/// The ASIC and simulation builders still write whole words, so sub-word
-/// stores clobber their neighbors there until they grow the same masking
-/// (a known follow-up).
+/// through MASKWREN, the ECP5 path through one x9 DP16KD per byte lane, the
+/// Xilinx path through the RAMB36E1 per-byte WEA lanes, and the generic
+/// sim/inferred-BRAM model through an explicit per-lane read-merge. The ASIC
+/// macro path still writes whole words (a known follow-up).
 class HarborSram extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   final int? busDataWidth;
   final int size;
   final int baseAddress;
@@ -91,9 +96,20 @@ class HarborSram extends BridgeModule
         we,
         ack,
         numWords,
+        bus.sel,
       );
     } else {
-      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords);
+      _buildSimModel(
+        clk,
+        wordAddr,
+        datIn,
+        datOut,
+        stb,
+        we,
+        ack,
+        numWords,
+        bus.sel,
+      );
     }
   }
 
@@ -108,14 +124,144 @@ class HarborSram extends BridgeModule
     Logic ack,
     Logic sel,
   ) {
+    // Exhaustive over the vendor enum on purpose: a new vendor must make a
+    // deliberate choice here rather than silently inheriting another vendor's
+    // primitive (a Xilinx build emitting Lattice DP16KD would never map).
     switch (target.vendor) {
       case HarborFpgaVendor.ecp5:
         _buildEcp5Bram(clk, wordAddr, datIn, datOut, stb, we, ack, sel);
       case HarborFpgaVendor.ice40:
         _buildIce40Bram(clk, wordAddr, datIn, datOut, stb, we, ack, sel);
-      default:
-        _buildEcp5Bram(clk, wordAddr, datIn, datOut, stb, we, ack, sel);
+      case HarborFpgaVendor.vivado:
+      case HarborFpgaVendor.openXc7:
+        _buildXilinxBram(clk, wordAddr, datIn, datOut, stb, we, ack, sel);
     }
+  }
+
+  void _buildXilinxBram(
+    Logic clk,
+    Logic wordAddr,
+    Logic datIn,
+    Logic datOut,
+    Logic stb,
+    Logic we,
+    Logic ack,
+    Logic sel,
+  ) {
+    // Xilinx 7-series RAMB36E1 in x36 mode: 1024 x 32-bit per block, with
+    // WEA[3:0] giving one write enable per byte lane so sub-word stores honor
+    // the bus byte selects. Words wider than 32 bits tile blocks across the
+    // width. Memories deeper than 1024 words cascade blocks across depth with
+    // an address-decoded read mux. The read is registered (one cycle), which
+    // lines up with the ack asserted the cycle after stb.
+    const blockWordDepth = 1024;
+    const blockDataWidth = 32;
+    const blockAddrWidth = 16;
+
+    final bytesPerWord = dataWidth ~/ 8;
+    final numWords = size ~/ bytesPerWord;
+    final widthBlocks = (dataWidth + blockDataWidth - 1) ~/ blockDataWidth;
+    final depthBlocks = (numWords + blockWordDepth - 1) ~/ blockWordDepth;
+    final totalBlocks = widthBlocks * depthBlocks;
+
+    // Beyond a sane block budget, fall back to the inferred-memory model rather
+    // than carpeting the device in BRAM (mirrors the ECP5 path).
+    if (totalBlocks > 64) {
+      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords, sel);
+      return;
+    }
+
+    final depthAddrBits = depthBlocks > 1 ? (depthBlocks - 1).bitLength : 0;
+    final bankSelect = depthAddrBits > 0
+        ? wordAddr.getRange(
+            blockWordDepth.bitLength - 1,
+            blockWordDepth.bitLength - 1 + depthAddrBits,
+          )
+        : null;
+
+    // x36 word index occupies ADDRARDADDR[14:5]: a 1-bit pad, the 10-bit word
+    // index, then the 5 low bits tied zero.
+    final addrBits = wordAddr.width < blockWordDepth.bitLength - 1
+        ? wordAddr.width
+        : blockWordDepth.bitLength - 1;
+    final localAddr = [
+      Const(0, width: 1),
+      wordAddr.getRange(0, addrBits).zeroExtend(blockWordDepth.bitLength - 1),
+      Const(0, width: 5),
+    ].swizzle().getRange(0, blockAddrWidth);
+
+    final bankOutputs = <Logic>[];
+    for (var d = 0; d < depthBlocks; d++) {
+      final bankEnable = bankSelect != null
+          ? bankSelect.eq(Const(d, width: depthAddrBits))
+          : Const(1);
+
+      final sliceOutputs = <Logic>[];
+      for (var w = 0; w < widthBlocks; w++) {
+        final bitLo = w * blockDataWidth;
+        final bitHi = (bitLo + blockDataWidth) > dataWidth
+            ? dataWidth
+            : bitLo + blockDataWidth;
+        final sliceWidth = bitHi - bitLo;
+
+        // One write enable per byte lane this block covers (the rest tied off).
+        final weBits = <Logic>[
+          for (var b = 3; b >= 0; b--)
+            (bitLo ~/ 8 + b) < bytesPerWord
+                ? (stb & we & bankEnable & sel[bitLo ~/ 8 + b])
+                : Const(0),
+        ].swizzle();
+
+        final bram = XilinxRamb36e1(name: 'bram_${d}_$w');
+        addSubModule(bram);
+
+        bram.input('CLKARDCLK').srcConnection! <= clk;
+        bram.input('ENARDEN').srcConnection! <= stb & bankEnable;
+        bram.input('ADDRARDADDR').srcConnection! <= localAddr;
+        bram.input('DIADI').srcConnection! <=
+            datIn.getRange(bitLo, bitHi).zeroExtend(blockDataWidth);
+        bram.input('DIPADIP').srcConnection! <= Const(0, width: 4);
+        bram.input('WEA').srcConnection! <= weBits;
+        bram.input('REGCEAREGCE').srcConnection! <= Const(0);
+        bram.input('RSTRAMARSTRAM').srcConnection! <= Const(0);
+
+        // Port B is unused.
+        bram.input('CLKBWRCLK').srcConnection! <= clk;
+        bram.input('ENBWREN').srcConnection! <= Const(0);
+        bram.input('WEBWE').srcConnection! <= Const(0, width: 8);
+        bram.input('ADDRBWRADDR').srcConnection! <= Const(0, width: 16);
+        bram.input('DIBDI').srcConnection! <= Const(0, width: 32);
+        bram.input('DIPBDIP').srcConnection! <= Const(0, width: 4);
+        bram.input('REGCEB').srcConnection! <= Const(0);
+        bram.input('RSTRAMB').srcConnection! <= Const(0);
+
+        sliceOutputs.add(bram.output('DOADO').getRange(0, sliceWidth));
+      }
+
+      final bankData = sliceOutputs.length == 1
+          ? sliceOutputs.first.zeroExtend(dataWidth)
+          : sliceOutputs.rswizzle().getRange(0, dataWidth);
+      bankOutputs.add(bankData);
+    }
+
+    if (depthBlocks == 1) {
+      datOut <= bankOutputs.first;
+    } else {
+      Logic readMux = bankOutputs.first;
+      for (var d = 1; d < depthBlocks; d++) {
+        readMux = mux(
+          bankSelect!.eq(Const(d, width: depthAddrBits)),
+          bankOutputs[d],
+          readMux,
+        );
+      }
+      datOut <= readMux;
+    }
+
+    Sequential(clk, [
+      ack < Const(0),
+      If(stb & ~ack, then: [ack < Const(1)]),
+    ]);
   }
 
   void _buildEcp5Bram(
@@ -143,7 +289,7 @@ class HarborSram extends BridgeModule
 
     // Limit: don't instantiate too many BRAMs
     if (totalBrams > 64) {
-      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords);
+      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords, sel);
       return;
     }
 
@@ -340,16 +486,17 @@ class HarborSram extends BridgeModule
     Logic we,
     Logic ack,
     int numWords,
+    Logic sel,
   ) {
     final pdk = target.provider;
     if (!pdk.hasSramMacro) {
-      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords);
+      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords, sel);
       return;
     }
 
     final macro = pdk.sramMacro(words: numWords, width: dataWidth);
     if (macro == null) {
-      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords);
+      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords, sel);
       return;
     }
 
@@ -392,7 +539,27 @@ class HarborSram extends BridgeModule
     Logic we,
     Logic ack,
     int numWords,
+    Logic sel,
   ) {
+    // Merge a write into the stored word honoring the Wishbone byte-lane
+    // selects: a lane keeps its old byte unless its sel bit is set. Without
+    // this a sub-word store (e.g. `sb`) writes the whole word and clobbers its
+    // neighbors, so a byte-at-a-time fill keeps only the last byte (found via
+    // the maskrom banner: SRAM read back as 0x..00 with only one lane set).
+    // The ECP5/iCE40 BRAM paths already honor sel via per-lane write enables.
+    // This keeps the generic sim/inferred-BRAM path faithful to them.
+    Logic mergeSel(Logic old, Logic data) {
+      final bytes = <Logic>[
+        for (var b = 0; b < dataWidth ~/ 8; b++)
+          mux(
+            sel[b],
+            data.getRange(b * 8, b * 8 + 8),
+            old.getRange(b * 8, b * 8 + 8),
+          ),
+      ];
+      return bytes.rswizzle();
+    }
+
     // For simulation or small memories: Yosys will infer BRAM from
     // this pattern during synthesis. Keep numWords reasonable.
     final maxSimWords = 1024;
@@ -425,7 +592,7 @@ class HarborSram extends BridgeModule
               for (var i = 0; i < effectiveWords; i++)
                 If(
                   wordAddr.eq(Const(i, width: wordAddr.width)),
-                  then: [mem[i] < datIn],
+                  then: [mem[i] < mergeSel(mem[i], datIn)],
                 ),
             ],
             orElse: [datOut < readData],
@@ -451,6 +618,15 @@ class HarborSram extends BridgeModule
       'compatible': ['harbor,sram', 'mmio-sram'],
       'data-width': dataWidth,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'SRAM',
+    groupName: 'SRAM',
+    description: 'On-chip SRAM memory',
+    baseAddress: baseAddress,
+    size: size,
   );
 }
 

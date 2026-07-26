@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// General-Purpose I/O (GPIO) peripheral.
 ///
@@ -19,7 +20,10 @@ import '../soc/device_tree.dart';
 /// - 0x10: IRQ_STATUS (read/write-1-to-clear, interrupt status)
 /// - 0x14: IRQ_EDGE (read/write, 0=level, 1=edge triggered)
 class HarborGpio extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Number of GPIO pins.
   final int pinCount;
 
@@ -186,5 +190,14 @@ class HarborGpio extends BridgeModule
       '#gpio-cells': 2,
       'gpio-controller': true,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'GPIO',
+    groupName: 'GPIO',
+    description: 'General-purpose I/O controller',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

@@ -4,14 +4,17 @@ import 'package:rohd/rohd.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 
 import '../bus/bus.dart';
+import '../bus/wishbone/wishbone_arbiter.dart';
 import '../bus/wishbone/wishbone_decoder.dart';
 import '../bus/wishbone/wishbone_interface.dart';
+import '../blackbox/xilinx/xilinx.dart';
 import '../clock/clock_domain.dart';
 import '../pdk/klayout.dart';
 import 'acpi.dart';
 import 'cpu.dart';
 import 'device_tree.dart';
 import 'graph.dart';
+import 'svd.dart';
 import 'target.dart';
 
 /// A composable SoC built on rohd_bridge.
@@ -65,11 +68,60 @@ class HarborSoC extends BridgeModule {
   final List<_PeripheralEntry> _peripherals = [];
   final List<_MasterEntry> _masters = [];
 
+  /// The fabric arbiter, exposed after [buildFabric] when there is more than one
+  /// master (null with a single master, which connects to the decoder directly).
+  /// Its `grant` output identifies the master currently owning the bus, which a
+  /// security peripheral can use as the unforgeable source identity.
+  WishboneArbiter? fabricArbiter;
+
+  /// Modules already added as submodules + clock-wired. A module may be BOTH a
+  /// master and a peripheral (a dual-role device like a DMA or an accelerator
+  /// with CSR slave + bus master). This set keeps the second [addMaster] /
+  /// [addPeripheral] from double-adding or double-driving its clk/reset.
+  final Set<BridgeModule> _wired = {};
+
+  /// Adds [module] as a submodule and wires its clk/reset exactly once, even if
+  /// it is registered as both a master and a peripheral.
+  void _wireOnce(BridgeModule module, String? clockDomainName) {
+    if (!_wired.add(module)) return;
+    addSubModule(module);
+    final (
+      clk,
+      reset,
+    ) = clockDomainName != null && _clockDomains.containsKey(clockDomainName)
+        ? (
+            _clockDomains[clockDomainName]!.clk,
+            _clockDomains[clockDomainName]!.reset,
+          )
+        : defaultClock;
+    module.input('clk').srcConnection! <= clk;
+    module.input('reset').srcConnection! <= reset;
+  }
+
   late final HarborClockGenerator _clockGen;
   final Map<String, HarborClockDomain> _clockDomains = {};
 
+  /// The Xilinx DDR3-fast clock tree, built in this SoC's clock generation when
+  /// [xilinxDdr3Tree] is provided. Null otherwise. Exposes the DDR CK / CLKDIV /
+  /// IDELAYCTRL-ref / CK90 / DQS clocks for the DDR controller peripheral, and
+  /// its spare `coreClk` drives any [HarborClockConfig.providedByDdr3Tree] domain
+  /// (so the core runs off the SAME MMCM as the DDR clocks: one MMCM on the pin).
+  late final XilinxDdr3Clocks? xilinxDdr3Clocks;
+
   final String acpiOemId;
   final String acpiOemTableId;
+
+  /// Vendor name for the generated CMSIS-SVD file.
+  final String svdVendor;
+
+  /// Version string for the generated CMSIS-SVD file.
+  final String svdVersion;
+
+  /// First interrupt source number handed out by the interrupt allocator.
+  ///
+  /// Source 0 is reserved (the "no interrupt" sentinel in PLIC/APLIC), so the
+  /// default first real source is 1.
+  final int interruptBase;
 
   /// Creates a new SoC.
   ///
@@ -81,9 +133,13 @@ class HarborSoC extends BridgeModule {
     required this.busConfig,
     this.acpiOemId = 'MIDSTL',
     this.acpiOemTableId = 'HARBOR',
+    this.svdVendor = 'Midstall',
+    this.svdVersion = '1.0',
+    this.interruptBase = 1,
     this.cpus = const [],
     this.target,
     List<HarborClockConfig> clocks = const [],
+    XilinxDdr3TreeSpec? xilinxDdr3Tree,
   }) : super(name, name: name) {
     createPort('clk', PortDirection.input);
 
@@ -123,8 +179,56 @@ class HarborSoC extends BridgeModule {
       target: target,
     );
 
+    // Xilinx DDR3-fast (single-oscillator, e.g. Arty S7): build the shared DDR3
+    // clock tree HERE (from the `clk` pin) so the core/sys domain can run off its
+    // spare core CLKOUT. A SECOND MMCM on the raw pin cannot share the pin's one
+    // dedicated clock-capable route on openXC7, so folding the core clock onto a
+    // spare output of the DDR MMCM keeps ONE MMCM on the pin.
+    final ddrSpec = xilinxDdr3Tree;
+    xilinxDdr3Clocks = ddrSpec == null
+        ? null
+        : buildXilinxDdr3ClockTree(
+            this,
+            source: input('clk'),
+            sourceHz: ddrSpec.sourceHz,
+            ddrCkHz: ddrSpec.ddrCkHz,
+            idelayRefHz: ddrSpec.idelayRefHz,
+            dqsPhaseDeg: ddrSpec.dqsPhaseDeg,
+            coreClkHz: ddrSpec.coreClkHz,
+          );
+
     for (final clkConfig in clocks) {
-      _clockDomains[clkConfig.name] = _clockGen.createDomain(clkConfig);
+      if (clkConfig.providedByDdr3Tree) {
+        final coreClk = xilinxDdr3Clocks?.coreClk;
+        if (coreClk == null) {
+          throw StateError(
+            'clock "${clkConfig.name}" is providedByDdr3Tree but no '
+            'xilinxDdr3Tree was supplied to build its core clock.',
+          );
+        }
+        _clockDomains[clkConfig.name] = _clockGen.createDomainFromClock(
+          clkConfig,
+          coreClk,
+          locked: xilinxDdr3Clocks?.locked,
+        );
+        continue;
+      }
+      final sec = clkConfig.coClkosSecondary;
+      if (sec != null) {
+        // One EHXPLLL drives both: CLKOP = this domain, CLKOS = the secondary.
+        // Avoids a 2nd PLL block that may not lock on silicon.
+        final shared = _clockGen.createDomainWithSecondary(
+          clkConfig,
+          secondaryFrequency: sec.frequency,
+          secondaryName: sec.name,
+        );
+        // Register the secondary FIRST so a 'sys'-named secondary stays the
+        // default clock (values.first), then the CLKOP primary.
+        _clockDomains[sec.name] = shared.secondary;
+        _clockDomains[clkConfig.name] = shared.primary;
+      } else {
+        _clockDomains[clkConfig.name] = _clockGen.createDomain(clkConfig);
+      }
     }
   }
 
@@ -140,8 +244,11 @@ class HarborSoC extends BridgeModule {
   /// Otherwise returns the raw input clock and reset.
   (Logic clk, Logic reset) get defaultClock {
     if (_clockDomains.isNotEmpty) {
-      final first = _clockDomains.values.first;
-      return (first.clk, first.reset);
+      // Prefer the conventional 'sys' bus domain: it may not be the first
+      // registered entry when it is a CLKOS secondary of another PLL, and fall
+      // back to the first domain otherwise.
+      final d = _clockDomains['sys'] ?? _clockDomains.values.first;
+      return (d.clk, d.reset);
     }
     return (input('clk'), input('reset'));
   }
@@ -171,27 +278,11 @@ class HarborSoC extends BridgeModule {
       );
     }
 
-    addSubModule(peripheral);
-
     final dt = (peripheral as HarborDeviceTreeNodeProvider).dtNode;
     _peripherals.add(
       _PeripheralEntry(module: peripheral, addressRange: dt.reg),
     );
-
-    // Wire clock and reset from the specified domain or default
-    final (
-      clk,
-      reset,
-    ) = clockDomainName != null && _clockDomains.containsKey(clockDomainName)
-        ? (
-            _clockDomains[clockDomainName]!.clk,
-            _clockDomains[clockDomainName]!.reset,
-          )
-        : defaultClock;
-
-    peripheral.input('clk').srcConnection! <= clk;
-    peripheral.input('reset').srcConnection! <= reset;
-
+    _wireOnce(peripheral, clockDomainName);
     return peripheral;
   }
 
@@ -206,24 +297,10 @@ class HarborSoC extends BridgeModule {
     String busInterfaceName = 'dataBus',
     String? clockDomainName,
   }) {
-    addSubModule(master);
     _masters.add(
       _MasterEntry(module: master, busInterfaceName: busInterfaceName),
     );
-
-    final (
-      clk,
-      reset,
-    ) = clockDomainName != null && _clockDomains.containsKey(clockDomainName)
-        ? (
-            _clockDomains[clockDomainName]!.clk,
-            _clockDomains[clockDomainName]!.reset,
-          )
-        : defaultClock;
-
-    master.input('clk').srcConnection! <= clk;
-    master.input('reset').srcConnection! <= reset;
-
+    _wireOnce(master, clockDomainName);
     return master;
   }
 
@@ -241,45 +318,99 @@ class HarborSoC extends BridgeModule {
     );
   }
 
-  /// Builds the bus fabric connecting masters to peripherals.
+  /// Checks the SoC for build-time integrity problems and returns every
+  /// problem found as a human-readable string. An empty list means the SoC is
+  /// consistent.
   ///
-  /// For each master, creates address-decode logic that routes
-  /// transactions to the correct peripheral based on
-  /// [HarborDeviceTreeNode.reg] address ranges.
+  /// [buildFabric] calls this and refuses to build when it returns anything,
+  /// so these checks turn silent surprises into loud failures. The checks are:
   ///
-  /// Must be called after all [addPeripheral] and [addMaster]
-  /// calls, before [build].
-  void buildFabric() {
-    if (_peripherals.isEmpty || _masters.isEmpty) return;
+  /// - peripheral address windows must not overlap,
+  /// - a peripheral's register map must have no overlapping fields,
+  /// - every register must fit within the peripheral's address block,
+  /// - no interrupt number may be assigned to two peripherals.
+  List<String> validate() {
+    final errors = <String>[];
 
-    // Validate no address overlaps
+    // Peripheral address windows must not overlap.
     final mappings = _peripherals.indexed
         .map(
           (e) =>
               HarborAddressMapping(range: e.$2.addressRange, slaveIndex: e.$1),
         )
         .toList();
+    errors.addAll(validateAddressMappings(mappings));
 
-    final errors = validateAddressMappings(mappings);
-    if (errors.isNotEmpty) {
-      throw StateError(
-        'Address mapping errors in $name:\n${errors.join("\n")}',
-      );
+    // Register maps: internal overlaps and out-of-block registers. The register
+    // map and its block size both come from the SVD view, so they are checked
+    // against a single source.
+    for (final entry in _peripherals) {
+      final m = entry.module;
+      if (m is! HarborSvdPeripheralProvider) continue;
+      final sp = (m as HarborSvdPeripheralProvider).svdPeripheral;
+      final regs = sp.registers;
+      if (regs == null) continue;
+
+      for (final overlap in regs.validate()) {
+        errors.add('${sp.name}: $overlap');
+      }
+      for (final f in regs.fields) {
+        if (f.end > sp.size) {
+          errors.add(
+            "${sp.name}: register '${f.name}' @ 0x${f.offset.toRadixString(16)} "
+            '(${f.width}B) exceeds address block size '
+            '0x${sp.size.toRadixString(16)}',
+          );
+        }
+      }
     }
 
-    for (final masterEntry in _masters) {
-      switch (busConfig) {
-        case WishboneConfig wbConfig:
-          _buildWishboneFabric(masterEntry, wbConfig);
-        default:
-          throw UnsupportedError(
-            'Bus protocol ${busConfig.runtimeType} not yet supported in buildFabric',
-          );
+    // No interrupt number may be assigned twice.
+    final seen = <int, String>{};
+    interruptAssignments().forEach((module, irq) {
+      final existing = seen[irq];
+      if (existing != null) {
+        errors.add(
+          'interrupt $irq assigned to both $existing and ${module.name}',
+        );
+      } else {
+        seen[irq] = module.name;
       }
+    });
+
+    return errors;
+  }
+
+  /// Builds the bus fabric connecting masters to peripherals.
+  ///
+  /// For each master, creates address-decode logic that routes
+  /// transactions to the correct peripheral based on
+  /// [HarborDeviceTreeNode.reg] address ranges.
+  ///
+  /// Validates the SoC via [validate] first and throws a [StateError] if any
+  /// problem is found.
+  ///
+  /// Must be called after all [addPeripheral] and [addMaster]
+  /// calls, before [build].
+  void buildFabric() {
+    final errors = validate();
+    if (errors.isNotEmpty) {
+      throw StateError('Validation errors in $name:\n${errors.join("\n")}');
+    }
+
+    if (_peripherals.isEmpty || _masters.isEmpty) return;
+
+    switch (busConfig) {
+      case WishboneConfig wbConfig:
+        _buildWishboneFabric(wbConfig);
+      default:
+        throw UnsupportedError(
+          'Bus protocol ${busConfig.runtimeType} not yet supported in buildFabric',
+        );
     }
   }
 
-  void _buildWishboneFabric(_MasterEntry masterEntry, WishboneConfig wbConfig) {
+  void _buildWishboneFabric(WishboneConfig wbConfig) {
     final mappings = _peripherals.indexed
         .map(
           (e) =>
@@ -290,11 +421,35 @@ class HarborSoC extends BridgeModule {
     final decoder = WishboneDecoder(wbConfig, mappings);
     addSubModule(decoder);
 
-    // Connect master's bus to decoder's master interface
-    connectInterfaces(
-      masterEntry.module.interface(masterEntry.busInterfaceName),
-      decoder.interface('master'),
-    );
+    // One master -> straight to the decoder. Multiple masters -> merge them
+    // through a WishboneArbiter first (round-robin, grant-locked) so they share
+    // the single decoder/peripheral fabric without multi-driving it.
+    if (_masters.length == 1) {
+      connectInterfaces(
+        _masters[0].module.interface(_masters[0].busInterfaceName),
+        decoder.interface('master'),
+      );
+    } else {
+      final arbiter = WishboneArbiter(
+        numMasters: _masters.length,
+        config: wbConfig,
+      );
+      fabricArbiter = arbiter;
+      addSubModule(arbiter);
+      final (clk, reset) = defaultClock;
+      arbiter.input('clk').srcConnection! <= clk;
+      arbiter.input('reset').srcConnection! <= reset;
+      for (var i = 0; i < _masters.length; i++) {
+        connectInterfaces(
+          _masters[i].module.interface(_masters[i].busInterfaceName),
+          arbiter.interface('master_$i'),
+        );
+      }
+      connectInterfaces(
+        arbiter.interface('slave'),
+        decoder.interface('master'),
+      );
+    }
 
     // Connect decoder's slave interfaces to peripherals
     for (var i = 0; i < _peripherals.length; i++) {
@@ -305,63 +460,137 @@ class HarborSoC extends BridgeModule {
     }
   }
 
+  /// Assigns an interrupt source number to every peripheral that sources an
+  /// interrupt, in the order peripherals were added.
+  ///
+  /// This is the single interrupt-number allocator for the SoC: the device
+  /// tree, ACPI, SVD, and graph generators all read this assignment rather
+  /// than each peripheral hardcoding its own number. A peripheral is treated
+  /// as an interrupt source when it has an `interrupt` output port and is not
+  /// itself an interrupt controller.
+  ///
+  /// The returned map is keyed by the peripheral module.
+  Map<BridgeModule, int> interruptAssignments() {
+    final result = <BridgeModule, int>{};
+    var next = interruptBase;
+    for (final entry in _peripherals) {
+      final m = entry.module;
+      if (m is HarborDeviceTreeNodeProvider &&
+          (m as HarborDeviceTreeNodeProvider).dtNode.interruptController) {
+        continue;
+      }
+      if (!_hasInterruptOutput(m)) continue;
+      result[m] = next++;
+    }
+    return result;
+  }
+
+  bool _hasInterruptOutput(BridgeModule m) {
+    try {
+      m.output('interrupt');
+      return true;
+    } on Exception {
+      return false;
+    }
+  }
+
   /// Generates a ACPICA compatible `.asl` file.
   String generateAcpi() {
+    final assign = interruptAssignments();
+    final providers = _peripherals
+        .map((e) => e.module)
+        .whereType<HarborAcpiDeviceProvider>()
+        .toList();
     return HarborAcpiGenerator(
       oemId: acpiOemId,
       oemTableId: acpiOemTableId,
       cpus: cpus,
-      peripherals: _peripherals
-          .map((e) => e.module)
-          .whereType<HarborAcpiDeviceProvider>()
-          .toList(),
+      peripherals: providers,
+      interrupts: {
+        for (final p in providers)
+          if (assign[p] != null) p: [assign[p]!],
+      },
     ).generate();
   }
 
   /// Generates a Linux/U-Boot compatible `.dts` file.
   String generateDts() {
+    final assign = interruptAssignments();
+    final providers = _peripherals
+        .map((e) => e.module)
+        .whereType<HarborDeviceTreeNodeProvider>()
+        .toList();
+    // Devices that back usable RAM contribute root `memory@` nodes, not just
+    // their controller node under `/soc`, so an OS/SBI payload finds RAM.
+    final memories = _peripherals
+        .map((e) => e.module)
+        .whereType<HarborSystemMemoryProvider>()
+        .expand((p) => p.systemMemory)
+        .toList();
     return HarborDeviceTreeGenerator(
       model: name,
       compatible: compatible,
       cpus: cpus,
-      peripherals: _peripherals
-          .map((e) => e.module)
-          .whereType<HarborDeviceTreeNodeProvider>()
-          .toList(),
+      peripherals: providers,
+      memories: memories,
+      interrupts: {
+        for (final p in providers)
+          if (assign[p] != null) p: [assign[p]!],
+      },
+    ).generate();
+  }
+
+  /// Generates a CMSIS-SVD (System View Description) file.
+  String generateSvd() {
+    final assign = interruptAssignments();
+    final providers = _peripherals
+        .map((e) => e.module)
+        .whereType<HarborSvdPeripheralProvider>()
+        .toList();
+    return HarborSvdGenerator(
+      vendor: svdVendor,
+      name: name,
+      version: svdVersion,
+      description: compatible,
+      cpus: cpus,
+      peripherals: providers,
+      interrupts: {
+        for (final p in providers)
+          if (assign[p] != null) p: [assign[p]!],
+      },
     ).generate();
   }
 
   /// Generates a Mermaid flowchart of this SoC's topology.
-  String generateMermaid() {
-    return HarborSoCGraphGenerator(
-      name: name,
-      cpus: cpus,
-      peripherals: _peripherals
-          .map((e) => e.module)
-          .whereType<HarborDeviceTreeNodeProvider>()
-          .toList(),
-    ).mermaid();
-  }
+  String generateMermaid() => _graphGenerator().mermaid();
 
   /// Generates a Graphviz DOT graph of this SoC's topology.
-  String generateDot() {
+  String generateDot() => _graphGenerator().dot();
+
+  HarborSoCGraphGenerator _graphGenerator() {
+    final assign = interruptAssignments();
+    final providers = _peripherals
+        .map((e) => e.module)
+        .whereType<HarborDeviceTreeNodeProvider>()
+        .toList();
     return HarborSoCGraphGenerator(
       name: name,
       cpus: cpus,
-      peripherals: _peripherals
-          .map((e) => e.module)
-          .whereType<HarborDeviceTreeNodeProvider>()
-          .toList(),
-    ).dot();
+      peripherals: providers,
+      interrupts: {
+        for (final p in providers)
+          if (assign[p] != null) p: [assign[p]!],
+      },
+    );
   }
 
   /// Builds RTL and writes all generated outputs to [outputPath].
   ///
   /// Generates:
-  /// - `rtl/` - SystemVerilog files + filelist.f (via rohd_bridge)
-  /// - `<name>.dts` - device tree source
-  /// - `<name>.dot` - Graphviz topology graph
-  /// - `<name>.mermaid.md` - Mermaid topology graph
+  /// - `rtl/`: SystemVerilog files + filelist.f (via rohd_bridge)
+  /// - `<name>.dts`: device tree source
+  /// - `<name>.dot`: Graphviz topology graph
+  /// - `<name>.mermaid.md`: Mermaid topology graph
   /// - Target-specific files:
   ///   - FPGA: constraint file (`.pcf`/`.lpf`/`.xdc`)
   ///   - ASIC: SDC timing constraints
@@ -369,8 +598,48 @@ class HarborSoC extends BridgeModule {
     directory.createSync(recursive: true);
     final path = directory.path;
 
-    // RTL generation via rohd_bridge
-    await buildAndGenerateRTL(outputPath: path);
+    // RTL generation: emit one SystemVerilog file per UNIQUIFIED module name.
+    //
+    // We deliberately do NOT use rohd_bridge's `buildAndGenerateRTL`, which
+    // names each output file by `module.definitionName`. When ROHD's
+    // synthesizer uniquifies two *distinct* modules that requested the same
+    // `definitionName` (e.g. `ParallelPrefixAdder_W64` and the second,
+    // structurally-different instance emitted as `ParallelPrefixAdder_W64_0`),
+    // both modules still report the same `definitionName`, so they collide onto
+    // a single file: one body clobbers the other (corrupting its `endmodule`)
+    // and the filelist lists it twice -> Verilator MODDUP/ENDLABEL errors.
+    //
+    // ROHD already prevents this: `SynthFileContents.name` carries the correct
+    // uniquified module name. Keying filenames on that yields one file per
+    // emitted module with no collision.
+    await build();
+    final synthBuilder = SynthBuilder(this, SystemVerilogSynthesizer());
+    final rtlPath = '$path/rtl';
+    Directory(rtlPath).createSync(recursive: true);
+    final filelist = StringBuffer();
+    for (final fileContents in synthBuilder.getSynthFileContents()) {
+      final fileName = '${fileContents.name}.sv';
+      var contents = fileContents.contents;
+      // ROHD emits the bidirectional `net_connect` helper with TWO ports that
+      // share the name `w` (`module net_connect #(...) (w, w)`), which yosys
+      // rejects as a duplicate port. Rewrite it to two distinct cross-assigned
+      // inout ports. Instantiations are positional, so this is transparent.
+      if (fileContents.name == 'net_connect' &&
+          RegExp(r'\(\s*w\s*,\s*w\s*\)').hasMatch(contents)) {
+        contents =
+            '// A special module for connecting two nets '
+            'bidirectionally\n'
+            'module net_connect #(parameter int WIDTH=1) (w0, w1);\n'
+            'inout wire [WIDTH-1:0] w0;\n'
+            'inout wire [WIDTH-1:0] w1;\n'
+            'assign w0 = w1;\n'
+            'assign w1 = w0;\n'
+            'endmodule\n';
+      }
+      File('$rtlPath/$fileName').writeAsStringSync(contents);
+      filelist.writeln('./rtl/$fileName');
+    }
+    File('$path/filelist.f').writeAsStringSync(filelist.toString());
 
     // Generate blackbox stubs for leaf modules (SRAM macros, etc.)
     final blackboxStubs = _generateBlackboxStubs();
@@ -383,6 +652,9 @@ class HarborSoC extends BridgeModule {
 
     // Device tree
     File('$path/$name.dts').writeAsStringSync(generateDts());
+
+    // CMSIS-SVD
+    File('$path/$name.svd').writeAsStringSync(generateSvd());
 
     // Graphs
     File('$path/$name.dot').writeAsStringSync(generateDot());

@@ -5,6 +5,8 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
+import 'device_register.dart';
 
 /// 16550-compatible UART peripheral.
 ///
@@ -27,7 +29,10 @@ import '../soc/device_tree.dart';
 /// whole addressed word with every register in its lane, so masters that
 /// issue word-aligned loads extract the byte they want.
 class HarborUart extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   final int? busDataWidth;
   final int baseAddress;
   final int clockFrequency;
@@ -430,5 +435,15 @@ class HarborUart extends BridgeModule
       'reg-io-width': 1,
       if (clockFrequency > 0) 'clock-frequency': clockFrequency,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'UART',
+    groupName: 'UART',
+    description: '16550-compatible UART',
+    baseAddress: baseAddress,
+    size: 0x1000,
+    registers: StandardRegisters.uart16550,
   );
 }

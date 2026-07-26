@@ -3,6 +3,7 @@
 // Common types
 export 'bus.dart';
 export 'bus_slave_port.dart';
+export 'firewall.dart';
 
 // Wishbone
 export 'wishbone/wishbone_interface.dart';

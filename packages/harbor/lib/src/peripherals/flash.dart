@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// Read-only flash/ROM memory module.
 ///
@@ -13,7 +14,10 @@ import '../soc/device_tree.dart';
 ///
 /// Used for boot ROM, firmware storage, etc.
 class HarborFlash extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Memory size in bytes.
   final int size;
 
@@ -82,5 +86,14 @@ class HarborFlash extends BridgeModule
       'compatible': ['harbor,flash', 'mtd-rom'],
       'data-width': dataWidth,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'FLASH',
+    groupName: 'FLASH',
+    description: 'Read-only flash/ROM memory',
+    baseAddress: baseAddress,
+    size: size,
   );
 }

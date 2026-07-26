@@ -101,8 +101,9 @@ class RiscVIsaConfig {
         funct3: funct3,
         funct7: funct7,
         instruction: instruction,
+        mxlen: mxlen,
       );
-      if (op != null && op.isValidFor(mxlen)) return op;
+      if (op != null) return op;
     }
     return null;
   }

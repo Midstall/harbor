@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// RISC-V IOMMU translation mode.
 enum HarborIommuMode {
@@ -47,7 +48,10 @@ enum HarborIommuMode {
 /// - 0x064: ipsr           0x100: iohpmcycles
 /// - 0x108-0x1F8: iohpmctr/iohpmevt
 class HarborIommu extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address for IOMMU registers.
   final int baseAddress;
 
@@ -131,74 +135,300 @@ class HarborIommu extends BridgeModule
 
     final clk = input('clk');
     final reset = input('reset');
+    final dmaAddr = input('dma_addr');
+    final dmaValid = input('dma_valid');
+    final dmaWrite = input('dma_write');
+    final ptwData = input('ptw_data');
+    final ptwValidIn = input('ptw_valid');
 
-    // IOMMU registers
+    // Translation FSM states.
+    const sIdle = 0;
+    const sWalk = 1; // issue a PTE read for the current level
+    const sPte = 2; // consume the returned PTE
+
+    // Fault causes (RISC-V IOMMU subset).
+    const faultPageFault = 1; // invalid PTE
+    const faultPermFault = 2; // R/W permission denied
+
+    // IOMMU registers. ddtp[0] enables translation (else bare passthrough),
+    // ddtp[63:12] is the Sv39 root page-table address (page-aligned). This is a
+    // single-context simplification of the full per-device directory.
     final capabilities = Logic(name: 'capabilities', width: 64);
     final fctl = Logic(name: 'fctl', width: 64);
     final ddtp = Logic(name: 'ddtp', width: 64);
-    final cqcsr = Logic(name: 'cqcsr', width: 32);
-    final fqcsr = Logic(name: 'fqcsr', width: 32);
     final ipsr = Logic(name: 'ipsr', width: 32);
 
-    // IOTLB state
-    final iotlbState = Logic(name: 'iotlb_state', width: 3);
+    // Direct-mapped IOTLB: VPN -> PPN with R/W permissions.
+    final idxBits = iotlbEntries <= 1 ? 1 : (iotlbEntries - 1).bitLength;
+    final n = 1 << idxBits;
+    final tlbValid = [for (var i = 0; i < n; i++) Logic(name: 'tlb_v$i')];
+    final tlbTag = [
+      for (var i = 0; i < n; i++) Logic(name: 'tlb_tag$i', width: 27),
+    ];
+    final tlbPpn = [
+      for (var i = 0; i < n; i++) Logic(name: 'tlb_ppn$i', width: 44),
+    ];
+    final tlbR = [for (var i = 0; i < n; i++) Logic(name: 'tlb_r$i')];
+    final tlbW = [for (var i = 0; i < n; i++) Logic(name: 'tlb_w$i')];
+
+    // Translation engine state.
+    final ioState = Logic(name: 'io_state', width: 2);
+    final walkLevel = Logic(name: 'walk_level', width: 2);
+    final walkBase = Logic(name: 'walk_base', width: 64); // table base address
+    final reqVa = Logic(name: 'req_va', width: 64);
+    final reqWrite = Logic(name: 'req_write');
+    final transAddrReg = Logic(name: 'trans_addr_reg', width: 64);
+    final transValidReg = Logic(name: 'trans_valid_reg');
+    final faultReg = Logic(name: 'fault_reg');
+    final faultCauseReg = Logic(name: 'fault_cause_reg', width: 8);
+    final ptwAddrReg = Logic(name: 'ptw_addr_reg', width: 64);
+    final ptwReadReg = Logic(name: 'ptw_read_reg');
+
+    // VA decomposition (Sv39).
+    final offset = reqVa.getRange(0, 12);
+    final vpn = reqVa.getRange(12, 39); // 27-bit virtual page number
+    final vpn0 = reqVa.getRange(12, 21);
+    final vpn1 = reqVa.getRange(21, 30);
+    final vpn2 = reqVa.getRange(30, 39);
+    final tlbIndex = vpn.getRange(0, idxBits);
+    final tlbTagOf = vpn.getRange(idxBits, 27).zeroExtend(27);
+
+    // IOTLB lookup (indexed read).
+    Logic tlbMux(List<Logic> arr) {
+      Logic out = arr[0];
+      for (var i = 1; i < n; i++) {
+        out = mux(tlbIndex.eq(Const(i, width: idxBits)), arr[i], out);
+      }
+      return out;
+    }
+
+    final hitValid = tlbMux(tlbValid);
+    final hitTag = tlbMux(tlbTag);
+    final hitPpn = tlbMux(tlbPpn);
+    final hitR = tlbMux(tlbR);
+    final hitW = tlbMux(tlbW);
+    final tlbHit = (hitValid & hitTag.eq(tlbTagOf)).named('tlb_hit');
+
+    // Sv39 root and per-level VPN.
+    final rootAddr = [ddtp.getRange(12, 64), Const(0, width: 12)].swizzle();
+    final levelVpn = mux(
+      walkLevel.eq(Const(2, width: 2)),
+      vpn2,
+      mux(walkLevel.eq(Const(1, width: 2)), vpn1, vpn0),
+    );
+    // PTE fields of the returned word.
+    final pteV = ptwData[0];
+    final pteR = ptwData[1];
+    final pteW = ptwData[2];
+    final pteX = ptwData[3];
+    final ptePpn = ptwData.getRange(10, 54); // 44-bit PPN
+    final pteLeaf = (pteR | pteX).named('pte_leaf');
+
+    final translatedPpnOffset = [
+      hitPpn,
+      offset,
+    ].swizzle().zeroExtend(64); // {ppn, offset}
+    final walkPpnOffset = [ptePpn, offset].swizzle().zeroExtend(64);
 
     interrupt <= ipsr.or();
 
-    Sequential(clk, [
-      If(
-        reset,
-        then: [
-          capabilities < Const(0, width: 64),
-          fctl < Const(0, width: 64),
-          ddtp < Const(0, width: 64),
-          cqcsr < Const(0, width: 32),
-          fqcsr < Const(0, width: 32),
-          ipsr < Const(0, width: 32),
-          iotlbState < Const(0, width: 3),
-          output('dma_translated_valid') < Const(0),
-          output('dma_fault') < Const(0),
-          output('ptw_read') < Const(0),
-          regBus.ack < Const(0),
-          regBus.dataOut < Const(0, width: 64),
-        ],
-        orElse: [
-          output('dma_translated_valid') < Const(0),
-          output('dma_fault') < Const(0),
-
-          // DMA translation pipeline:
-          // 1. Look up device_id in device directory -> get translation config
-          // 2. Check IOTLB for cached translation
-          // 3. On miss: walk page table
-          // 4. Check permissions
-          // 5. Output translated address or fault
-
-          // Register access
-          regBus.ack < Const(0),
-          If(
-            regBus.stb & ~regBus.ack,
-            then: [
-              regBus.ack < Const(1),
-              // Decode register address and read/write
-            ],
-          ),
-
-          // Command queue processing
-          // Fault queue management
-          // Page request queue (ATS)
-        ],
-      ),
-    ]);
-
-    // Placeholder outputs
-    output('dma_translated_addr') <= Const(0, width: 64);
-    output('dma_fault_cause') <= Const(0, width: 8);
-    output('ptw_addr') <= Const(0, width: 64);
+    output('dma_translated_addr') <= transAddrReg;
+    output('dma_translated_valid') <= transValidReg;
+    output('dma_fault') <= faultReg;
+    output('dma_fault_cause') <= faultCauseReg;
+    output('ptw_addr') <= ptwAddrReg;
+    output('ptw_read') <= ptwReadReg;
     if (msiTranslation) {
       output('msi_addr') <= Const(0, width: 64);
       output('msi_data') <= Const(0, width: 32);
       output('msi_valid') <= Const(0);
     }
+
+    Sequential(clk, [
+      If(
+        reset,
+        then: [
+          // Capability register: report Sv39 single-stage support (version 1.0).
+          capabilities < Const(0x0102, width: 64),
+          fctl < Const(0, width: 64),
+          ddtp < Const(0, width: 64),
+          ipsr < Const(0, width: 32),
+          for (var i = 0; i < n; i++) ...[
+            tlbValid[i] < Const(0),
+            tlbTag[i] < Const(0, width: 27),
+            tlbPpn[i] < Const(0, width: 44),
+            tlbR[i] < Const(0),
+            tlbW[i] < Const(0),
+          ],
+          ioState < Const(sIdle, width: 2),
+          walkLevel < Const(0, width: 2),
+          walkBase < Const(0, width: 64),
+          reqVa < Const(0, width: 64),
+          reqWrite < Const(0),
+          transAddrReg < Const(0, width: 64),
+          transValidReg < Const(0),
+          faultReg < Const(0),
+          faultCauseReg < Const(0, width: 8),
+          ptwAddrReg < Const(0, width: 64),
+          ptwReadReg < Const(0),
+          regBus.ack < Const(0),
+          regBus.dataOut < Const(0, width: 64),
+        ],
+        orElse: [
+          // Single-cycle pulses by default.
+          transValidReg < Const(0),
+          faultReg < Const(0),
+
+          // Translation engine.
+          Case(ioState, [
+            CaseItem(Const(sIdle, width: 2), [
+              If(
+                dmaValid,
+                then: [
+                  reqVa < dmaAddr,
+                  reqWrite < dmaWrite,
+                  If(
+                    ~ddtp[0],
+                    // Bare: pass the address through untranslated.
+                    then: [transAddrReg < dmaAddr, transValidReg < Const(1)],
+                    orElse: [
+                      // Translate. Try the IOTLB first.
+                      If(
+                        tlbHit,
+                        then: [
+                          If(
+                            dmaWrite & ~hitW | ~dmaWrite & ~hitR,
+                            then: [
+                              faultReg < Const(1),
+                              faultCauseReg < Const(faultPermFault, width: 8),
+                            ],
+                            orElse: [
+                              transAddrReg < translatedPpnOffset,
+                              transValidReg < Const(1),
+                            ],
+                          ),
+                        ],
+                        // Miss: walk the page table from the root.
+                        orElse: [
+                          walkBase < rootAddr,
+                          walkLevel < Const(2, width: 2),
+                          ioState < Const(sWalk, width: 2),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ]),
+            CaseItem(Const(sWalk, width: 2), [
+              ptwAddrReg <
+                  (walkBase + (levelVpn.zeroExtend(64) << Const(3, width: 64))),
+              ptwReadReg < Const(1),
+              ioState < Const(sPte, width: 2),
+            ]),
+            CaseItem(Const(sPte, width: 2), [
+              If(
+                ptwValidIn,
+                then: [
+                  ptwReadReg < Const(0),
+                  If(
+                    ~pteV,
+                    // Invalid PTE -> page fault.
+                    then: [
+                      faultReg < Const(1),
+                      faultCauseReg < Const(faultPageFault, width: 8),
+                      ioState < Const(sIdle, width: 2),
+                    ],
+                    orElse: [
+                      If(
+                        pteLeaf,
+                        then: [
+                          // Leaf: fill the IOTLB and translate (or perm-fault).
+                          for (var i = 0; i < n; i++)
+                            If(
+                              tlbIndex.eq(Const(i, width: idxBits)),
+                              then: [
+                                tlbValid[i] < Const(1),
+                                tlbTag[i] < tlbTagOf,
+                                tlbPpn[i] < ptePpn,
+                                tlbR[i] < pteR,
+                                tlbW[i] < pteW,
+                              ],
+                            ),
+                          If(
+                            reqWrite & ~pteW | ~reqWrite & ~pteR,
+                            then: [
+                              faultReg < Const(1),
+                              faultCauseReg < Const(faultPermFault, width: 8),
+                            ],
+                            orElse: [
+                              transAddrReg < walkPpnOffset,
+                              transValidReg < Const(1),
+                            ],
+                          ),
+                          ioState < Const(sIdle, width: 2),
+                        ],
+                        orElse: [
+                          // Pointer to the next level.
+                          If(
+                            walkLevel.eq(Const(0, width: 2)),
+                            // No leaf at the last level -> fault.
+                            then: [
+                              faultReg < Const(1),
+                              faultCauseReg < Const(faultPageFault, width: 8),
+                              ioState < Const(sIdle, width: 2),
+                            ],
+                            orElse: [
+                              walkBase <
+                                  [
+                                    ptePpn,
+                                    Const(0, width: 12),
+                                  ].swizzle().zeroExtend(64),
+                              walkLevel < (walkLevel - Const(1, width: 2)),
+                              ioState < Const(sWalk, width: 2),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ]),
+          ]),
+
+          // Register access (64-bit registers, 8-byte aligned: index addr[6:3]).
+          regBus.ack < Const(0),
+          regBus.dataOut < Const(0, width: 64),
+          If(
+            regBus.stb & ~regBus.ack,
+            then: [
+              regBus.ack < Const(1),
+              Case(regBus.addr.getRange(3, 7), [
+                // 0x000: capabilities (read-only).
+                CaseItem(Const(0, width: 4), [regBus.dataOut < capabilities]),
+                // 0x008: fctl.
+                CaseItem(Const(1, width: 4), [
+                  If(
+                    regBus.we,
+                    then: [fctl < regBus.dataIn],
+                    orElse: [regBus.dataOut < fctl],
+                  ),
+                ]),
+                // 0x010: ddtp.
+                CaseItem(Const(2, width: 4), [
+                  If(
+                    regBus.we,
+                    then: [ddtp < regBus.dataIn],
+                    orElse: [regBus.dataOut < ddtp],
+                  ),
+                ]),
+              ]),
+            ],
+          ),
+        ],
+      ),
+    ]);
   }
 
   @override
@@ -223,5 +453,14 @@ class HarborIommu extends BridgeModule
       'riscv,iotlb-entries': iotlbEntries,
       'riscv,max-mode': maxMode.name,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'IOMMU',
+    groupName: 'IOMMU',
+    description: 'RISC-V I/O Memory Management Unit',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

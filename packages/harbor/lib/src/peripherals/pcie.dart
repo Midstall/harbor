@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 import '../util/pretty_string.dart';
 
 /// PCIe generation.
@@ -149,7 +150,10 @@ class HarborPcieConfig with HarborPrettyString {
 ///
 /// ECAM space is mapped at a separate memory region for config access.
 class HarborPcieController extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// PCIe configuration.
   final HarborPcieConfig config;
 
@@ -164,6 +168,9 @@ class HarborPcieController extends BridgeModule
 
   /// Bus slave port (register access).
   late final BusSlavePort bus;
+
+  /// ECAM configuration-space slave port.
+  late final BusSlavePort ecam;
 
   /// Interrupt output.
   Logic get interrupt => output('interrupt');
@@ -185,7 +192,7 @@ class HarborPcieController extends BridgeModule
     addOutput('clkreq_n'); // Clock request (active low)
     createPort('wake_n', PortDirection.input); // Wake (active low)
 
-    // PCIe PIPE interface (simplified - real impl uses PIPE PHY)
+    // PCIe PIPE interface (simplified: real impl uses PIPE PHY)
     for (var i = 0; i < config.maxLanes.count; i++) {
       createPort('rxp_$i', PortDirection.input);
       createPort('rxn_$i', PortDirection.input);
@@ -193,11 +200,51 @@ class HarborPcieController extends BridgeModule
       addOutput('txn_$i');
     }
 
+    // Downstream master port. The TLP engine drives memory requests into PCIe
+    // address space here. In simulation a memory model backs it (the endpoint).
+    // Single-beat handshake: stb asserts a request, ack completes it.
+    addOutput('pcie_m_addr', width: 64);
+    addOutput('pcie_m_wdata', width: 32);
+    addOutput('pcie_m_we');
+    addOutput('pcie_m_stb');
+    createPort('pcie_m_rdata', PortDirection.input, width: 32);
+    createPort('pcie_m_ack', PortDirection.input);
+
+    // Endpoint inbound target. A host MWr/MRd to one of this function's BAR
+    // windows arrives here as a request. The endpoint performs it against its
+    // local memory (ep_m_*) and, for reads, returns the completion data.
+    if (config.role == HarborPcieRole.endpoint) {
+      createPort('ep_req_valid', PortDirection.input);
+      createPort('ep_req_write', PortDirection.input);
+      createPort('ep_req_addr', PortDirection.input, width: 32);
+      createPort('ep_req_wdata', PortDirection.input, width: 32);
+      addOutput('ep_req_ack'); // request complete (one cycle)
+      addOutput('ep_cpl_data', width: 32); // read completion data
+      addOutput('ep_m_addr', width: 32); // local-memory port
+      addOutput('ep_m_wdata', width: 32);
+      addOutput('ep_m_we');
+      addOutput('ep_m_stb');
+      createPort('ep_m_rdata', PortDirection.input, width: 32);
+      createPort('ep_m_ack', PortDirection.input);
+    }
+
     bus = BusSlavePort.create(
       module: this,
       name: 'bus',
       protocol: protocol,
       addressWidth: 8,
+      dataWidth: 32,
+    );
+
+    // ECAM configuration-space port. The fabric strips the byte offset, so the
+    // address is a dword index laid out as {bus[7:0], dev[4:0], fn[2:0],
+    // reg[9:0]} = 26 bits. The root complex answers config accesses to its own
+    // host-bridge function (00:00.0) and master-aborts everything else.
+    ecam = BusSlavePort.create(
+      module: this,
+      name: 'ecam',
+      protocol: protocol,
+      addressWidth: 26,
       dataWidth: 32,
     );
 
@@ -221,14 +268,126 @@ class HarborPcieController extends BridgeModule
     final msiMask = Logic(name: 'msi_mask', width: 32);
     final msiPend = Logic(name: 'msi_pend', width: 32);
 
+    // Link training state machine (LTSSM). The major states are modelled with
+    // a short dwell in each training state. On real silicon these are driven by
+    // ordered-set exchange and electrical timers, here a few cycles each is
+    // enough to verify the bring-up sequence and the status/interrupt plumbing.
+    const sDetect = 0;
+    const sPolling = 1;
+    const sConfig = 2;
+    const sL0 = 3;
+    const sRecovery = 4;
+    const trainDwell = 4;
+
+    final ltssm = Logic(name: 'ltssm', width: 3);
+    final dwell = Logic(name: 'ltssm_dwell', width: 4);
+    final retrainReq = Logic(name: 'retrain_req');
+    final linkDisable = Logic(name: 'link_disable');
+    final txTog = Logic(name: 'tx_tog');
+
+    // Host-bridge (00:00.0) configuration-space state. The identity registers
+    // are constants. Command and the bus-number register are written by
+    // enumeration software.
+    final cfgCommand = Logic(name: 'cfg_command', width: 16);
+    final cfgBusNumbers = Logic(name: 'cfg_bus_numbers', width: 32);
+
+    // Configuration-space identity. A root complex presents a PCI-to-PCI
+    // bridge (Type 1) at 00:00.0. An endpoint presents a Type 0 function.
+    final isEndpoint = config.role == HarborPcieRole.endpoint;
+    final cfgVendorDevice = isEndpoint ? 0x10EF1AF4 : 0x00081B36;
+    final cfgClassRev = isEndpoint ? 0x12000001 : 0x06040001;
+    final cfgHeaderType = isEndpoint ? 0x00000000 : 0x00010000;
+    const cfgCapPtr = 0x00000040; // first capability at byte 0x40
+    const cfgMsiCap = 0x00800005; // MSI cap: id 0x05, msgctrl 0x0080
+
+    // TLP engine: assembles Memory Write / Memory Read transaction-layer
+    // packets and moves the payload over the downstream master port. The
+    // requester ID is the root complex function 00:00.0.
+    const tlpDepth = 8; // data buffer depth in DWords
+    const tIdle = 0;
+    const tWrite = 1;
+    const tRead = 2;
+
+    final tlpAddrLo = Logic(name: 'tlp_addr_lo', width: 32);
+    final tlpAddrHi = Logic(name: 'tlp_addr_hi', width: 32);
+    final tlpLen = Logic(name: 'tlp_len', width: 4); // up to tlpDepth DWords
+    final tlpState = Logic(name: 'tlp_state', width: 2);
+    final tlpBusy = Logic(name: 'tlp_busy');
+    final tlpDone = Logic(name: 'tlp_done');
+    final tlpTag = Logic(name: 'tlp_tag', width: 8);
+    final tlpIdx = Logic(name: 'tlp_idx', width: 4);
+    final tlpWrPtr = Logic(name: 'tlp_wr_ptr', width: 4);
+    final tlpRdPtr = Logic(name: 'tlp_rd_ptr', width: 4);
+    final hdr0 = Logic(name: 'tlp_hdr0', width: 32);
+    final hdr1 = Logic(name: 'tlp_hdr1', width: 32);
+    final hdr2 = Logic(name: 'tlp_hdr2', width: 32);
+    final msiBusy = Logic(name: 'msi_busy');
+    final msiVec = Logic(name: 'msi_vec', width: 5);
+    final mAddrReg = Logic(name: 'm_addr_reg', width: 64);
+    final mWdataReg = Logic(name: 'm_wdata_reg', width: 32);
+    final mWeReg = Logic(name: 'm_we_reg');
+    final mStbReg = Logic(name: 'm_stb_reg');
+    final dbuf = List.generate(
+      tlpDepth,
+      (i) => Logic(name: 'tlp_dbuf_$i', width: 32),
+    );
+
+    final mAck = input('pcie_m_ack');
+    final mRdata = input('pcie_m_rdata');
+    final tlpBase = [tlpAddrHi, tlpAddrLo].swizzle().named('tlp_base');
+    // Data-buffer read mux for the next beat and for software reads.
+    Logic dbufAt(Logic idx) {
+      Logic v = Const(0, width: 32);
+      for (var i = tlpDepth - 1; i >= 0; i--) {
+        v = mux(idx.eq(Const(i, width: 4)), dbuf[i], v);
+      }
+      return v;
+    }
+
+    output('pcie_m_addr') <= mAddrReg;
+    output('pcie_m_wdata') <= mWdataReg;
+    output('pcie_m_we') <= mWeReg;
+    output('pcie_m_stb') <= mStbReg;
+
+    // Endpoint inbound-target state.
+    const epIdle = 0;
+    const epAccess = 1;
+    final epState = Logic(name: 'ep_state');
+    final epWrite = Logic(name: 'ep_write');
+    final epAckReg = Logic(name: 'ep_ack_reg');
+    final epCplReg = Logic(name: 'ep_cpl_reg', width: 32);
+    final epMAddrReg = Logic(name: 'ep_m_addr_reg', width: 32);
+    final epMWdataReg = Logic(name: 'ep_m_wdata_reg', width: 32);
+    final epMWeReg = Logic(name: 'ep_m_we_reg');
+    final epMStbReg = Logic(name: 'ep_m_stb_reg');
+    if (isEndpoint) {
+      output('ep_req_ack') <= epAckReg;
+      output('ep_cpl_data') <= epCplReg;
+      output('ep_m_addr') <= epMAddrReg;
+      output('ep_m_wdata') <= epMWdataReg;
+      output('ep_m_we') <= epMWeReg;
+      output('ep_m_stb') <= epMStbReg;
+    }
+
+    // A receiver is present when the partner holds its lane-0 differential out
+    // of the all-low electrical-idle state. Tests drive rxn high to attach.
+    final rxPresent = input('rxn_0').named('rx_present');
+    final training =
+        (ltssm.eq(Const(sPolling, width: 3)) |
+                ltssm.eq(Const(sConfig, width: 3)) |
+                ltssm.eq(Const(sRecovery, width: 3)))
+            .named('ltssm_training');
+    final linkActive = (training | linkUp).named('link_active');
+
     interrupt <= (intStatus & intEnable).or();
     output('perst_n') <= enable;
     output('clkreq_n') <= ~enable;
 
-    // Default TX outputs
+    // TX lanes carry a toggling training/idle pattern while the link is active,
+    // and sit in electrical idle (p low, n high) otherwise.
     for (var i = 0; i < config.maxLanes.count; i++) {
-      output('txp_$i') <= Const(0);
-      output('txn_$i') <= Const(1);
+      output('txp_$i') <= (linkActive & txTog);
+      output('txn_$i') <= ~(linkActive & txTog);
     }
 
     Sequential(clk, [
@@ -250,12 +409,230 @@ class HarborPcieController extends BridgeModule
           msiData < Const(0, width: 16),
           msiMask < Const(0, width: 32),
           msiPend < Const(0, width: 32),
+          ltssm < Const(sDetect, width: 3),
+          dwell < Const(0, width: 4),
+          retrainReq < Const(0),
+          linkDisable < Const(0),
+          txTog < Const(0),
+          cfgCommand < Const(0, width: 16),
+          cfgBusNumbers < Const(0, width: 32),
+          tlpAddrLo < Const(0, width: 32),
+          tlpAddrHi < Const(0, width: 32),
+          tlpLen < Const(0, width: 4),
+          tlpState < Const(tIdle, width: 2),
+          tlpBusy < Const(0),
+          tlpDone < Const(0),
+          tlpTag < Const(0, width: 8),
+          tlpIdx < Const(0, width: 4),
+          tlpWrPtr < Const(0, width: 4),
+          tlpRdPtr < Const(0, width: 4),
+          hdr0 < Const(0, width: 32),
+          hdr1 < Const(0, width: 32),
+          hdr2 < Const(0, width: 32),
+          msiBusy < Const(0),
+          msiVec < Const(0, width: 5),
+          mAddrReg < Const(0, width: 64),
+          mWdataReg < Const(0, width: 32),
+          mWeReg < Const(0),
+          mStbReg < Const(0),
+          ...List.generate(tlpDepth, (i) => dbuf[i] < Const(0, width: 32)),
+          epState < Const(epIdle, width: 1),
+          epWrite < Const(0),
+          epAckReg < Const(0),
+          epCplReg < Const(0, width: 32),
+          epMAddrReg < Const(0, width: 32),
+          epMWdataReg < Const(0, width: 32),
+          epMWeReg < Const(0),
+          epMStbReg < Const(0),
           bus.ack < Const(0),
           bus.dataOut < Const(0, width: 32),
+          ecam.ack < Const(0),
+          ecam.dataOut < Const(0, width: 32),
         ],
         orElse: [
           bus.ack < Const(0),
           bus.dataOut < Const(0, width: 32),
+          ecam.ack < Const(0),
+          ecam.dataOut < Const(0, width: 32),
+          txTog < ~txTog,
+
+          If(
+            ~enable | linkDisable,
+            then: [
+              // Forced down: drop the link and return to Detect.
+              If(
+                linkUp,
+                then: [intStatus < (intStatus | Const(0x02, width: 8))],
+              ),
+              ltssm < Const(sDetect, width: 3),
+              dwell < Const(0, width: 4),
+              linkUp < Const(0),
+            ],
+            orElse: [
+              Case(ltssm, [
+                CaseItem(Const(sDetect, width: 3), [
+                  If(
+                    rxPresent,
+                    then: [
+                      If(
+                        dwell.eq(Const(trainDwell, width: 4)),
+                        then: [
+                          ltssm < Const(sPolling, width: 3),
+                          dwell < Const(0, width: 4),
+                        ],
+                        orElse: [dwell < (dwell + Const(1, width: 4))],
+                      ),
+                    ],
+                    orElse: [dwell < Const(0, width: 4)],
+                  ),
+                ]),
+                CaseItem(Const(sPolling, width: 3), [
+                  If(
+                    dwell.eq(Const(trainDwell, width: 4)),
+                    then: [
+                      ltssm < Const(sConfig, width: 3),
+                      dwell < Const(0, width: 4),
+                    ],
+                    orElse: [dwell < (dwell + Const(1, width: 4))],
+                  ),
+                ]),
+                CaseItem(Const(sConfig, width: 3), [
+                  If(
+                    dwell.eq(Const(trainDwell, width: 4)),
+                    then: [
+                      ltssm < Const(sL0, width: 3),
+                      dwell < Const(0, width: 4),
+                      linkUp < Const(1),
+                      negGen < Const(config.maxGen.gen, width: 3),
+                      negLanes < Const(config.maxLanes.count, width: 5),
+                      intStatus < (intStatus | Const(0x01, width: 8)),
+                    ],
+                    orElse: [dwell < (dwell + Const(1, width: 4))],
+                  ),
+                ]),
+                CaseItem(Const(sL0, width: 3), [
+                  If(
+                    ~rxPresent,
+                    then: [
+                      ltssm < Const(sDetect, width: 3),
+                      linkUp < Const(0),
+                      intStatus < (intStatus | Const(0x02, width: 8)),
+                    ],
+                    orElse: [
+                      If(
+                        retrainReq,
+                        then: [
+                          ltssm < Const(sRecovery, width: 3),
+                          dwell < Const(0, width: 4),
+                          retrainReq < Const(0),
+                        ],
+                      ),
+                    ],
+                  ),
+                ]),
+                CaseItem(Const(sRecovery, width: 3), [
+                  If(
+                    dwell.eq(Const(trainDwell, width: 4)),
+                    then: [
+                      ltssm < Const(sL0, width: 3),
+                      dwell < Const(0, width: 4),
+                    ],
+                    orElse: [dwell < (dwell + Const(1, width: 4))],
+                  ),
+                ]),
+              ]),
+            ],
+          ),
+
+          If(
+            mStbReg & mAck,
+            then: [
+              Case(tlpState, [
+                CaseItem(Const(tWrite, width: 2), [
+                  If(
+                    (tlpIdx + Const(1, width: 4)).eq(tlpLen),
+                    then: [
+                      mStbReg < Const(0),
+                      mWeReg < Const(0),
+                      tlpBusy < Const(0),
+                      tlpDone < Const(1),
+                      tlpState < Const(tIdle, width: 2),
+                      If(
+                        msiBusy,
+                        then: [
+                          msiBusy < Const(0),
+                          msiPend <
+                              (msiPend |
+                                  (Const(1, width: 32) <<
+                                      msiVec.zeroExtend(32))),
+                          intStatus < (intStatus | Const(0x04, width: 8)),
+                        ],
+                      ),
+                    ],
+                    orElse: [
+                      tlpIdx < (tlpIdx + Const(1, width: 4)),
+                      mAddrReg <
+                          (tlpBase +
+                              ((tlpIdx + Const(1, width: 4)).zeroExtend(64) *
+                                  Const(4, width: 64))),
+                      mWdataReg < dbufAt(tlpIdx + Const(1, width: 4)),
+                    ],
+                  ),
+                ]),
+                CaseItem(Const(tRead, width: 2), [
+                  for (var i = 0; i < tlpDepth; i++)
+                    If(tlpIdx.eq(Const(i, width: 4)), then: [dbuf[i] < mRdata]),
+                  If(
+                    (tlpIdx + Const(1, width: 4)).eq(tlpLen),
+                    then: [
+                      mStbReg < Const(0),
+                      tlpBusy < Const(0),
+                      tlpDone < Const(1),
+                      tlpState < Const(tIdle, width: 2),
+                    ],
+                    orElse: [
+                      tlpIdx < (tlpIdx + Const(1, width: 4)),
+                      mAddrReg <
+                          (tlpBase +
+                              ((tlpIdx + Const(1, width: 4)).zeroExtend(64) *
+                                  Const(4, width: 64))),
+                    ],
+                  ),
+                ]),
+              ]),
+            ],
+          ),
+
+          if (isEndpoint)
+            Case(epState, [
+              CaseItem(Const(epIdle, width: 1), [
+                epAckReg < Const(0),
+                If(
+                  input('ep_req_valid'),
+                  then: [
+                    epWrite < input('ep_req_write'),
+                    epMAddrReg < input('ep_req_addr'),
+                    epMWdataReg < input('ep_req_wdata'),
+                    epMWeReg < input('ep_req_write'),
+                    epMStbReg < Const(1),
+                    epState < Const(epAccess, width: 1),
+                  ],
+                ),
+              ]),
+              CaseItem(Const(epAccess, width: 1), [
+                If(
+                  input('ep_m_ack'),
+                  then: [
+                    epMStbReg < Const(0),
+                    epMWeReg < Const(0),
+                    // For a read, latch the data for the completion.
+                    If(~epWrite, then: [epCplReg < input('ep_m_rdata')]),
+                    epAckReg < Const(1),
+                    epState < Const(epIdle, width: 1),
+                  ],
+                ),
+              ]),
+            ]),
 
           If(
             bus.stb & ~bus.ack,
@@ -271,16 +648,27 @@ class HarborPcieController extends BridgeModule
                     orElse: [bus.dataOut < enable.zeroExtend(32)],
                   ),
                 ]),
-                // 0x004: STATUS
+                // 0x004: STATUS (link_up, neg gen/lanes, ltssm state)
                 CaseItem(Const(0x01, width: 6), [
                   bus.dataOut <
                       linkUp.zeroExtend(32) |
                           (negGen.zeroExtend(32) << Const(4, width: 32)) |
-                          (negLanes.zeroExtend(32) << Const(8, width: 32)),
+                          (negLanes.zeroExtend(32) << Const(8, width: 32)) |
+                          (ltssm.zeroExtend(32) << Const(16, width: 32)),
                 ]),
-                // 0x008: LINK_CTRL
+                // 0x008: LINK_CTRL ([0] retrain, [1] link disable)
                 CaseItem(Const(0x02, width: 6), [
-                  bus.dataOut < Const(0, width: 32),
+                  If(
+                    bus.we,
+                    then: [
+                      retrainReq < bus.dataIn[0],
+                      linkDisable < bus.dataIn[1],
+                    ],
+                    orElse: [
+                      bus.dataOut <
+                          linkDisable.zeroExtend(32) << Const(1, width: 32),
+                    ],
+                  ),
                 ]),
                 // 0x00C: INT_STATUS (W1C)
                 CaseItem(Const(0x03, width: 6), [
@@ -368,7 +756,213 @@ class HarborPcieController extends BridgeModule
                 ]),
                 // 0x04C: MSI_PEND
                 CaseItem(Const(0x13, width: 6), [bus.dataOut < msiPend]),
+                // 0x050: TLP_ADDR_LO (PCIe target address, low 32 bits)
+                CaseItem(Const(0x14, width: 6), [
+                  If(
+                    bus.we,
+                    then: [tlpAddrLo < bus.dataIn],
+                    orElse: [bus.dataOut < tlpAddrLo],
+                  ),
+                ]),
+                // 0x054: TLP_ADDR_HI
+                CaseItem(Const(0x15, width: 6), [
+                  If(
+                    bus.we,
+                    then: [tlpAddrHi < bus.dataIn],
+                    orElse: [bus.dataOut < tlpAddrHi],
+                  ),
+                ]),
+                // 0x058: TLP_LEN (DWords), a write resets the data pointers
+                CaseItem(Const(0x16, width: 6), [
+                  If(
+                    bus.we,
+                    then: [
+                      tlpLen < bus.dataIn.getRange(0, 4),
+                      tlpWrPtr < Const(0, width: 4),
+                      tlpRdPtr < Const(0, width: 4),
+                    ],
+                    orElse: [bus.dataOut < tlpLen.zeroExtend(32)],
+                  ),
+                ]),
+                // 0x05C: TLP_CTRL ([0] start, [1] is-write) assembles and sends
+                CaseItem(Const(0x17, width: 6), [
+                  If(
+                    bus.we & bus.dataIn[0],
+                    then: [
+                      tlpBusy < Const(1),
+                      tlpDone < Const(0),
+                      tlpIdx < Const(0, width: 4),
+                      tlpTag < (tlpTag + Const(1, width: 8)),
+                      msiBusy < Const(0),
+                      hdr0 <
+                          (mux(
+                                    bus.dataIn[1],
+                                    Const(0x40, width: 32),
+                                    Const(0x00, width: 32),
+                                  ) <<
+                                  Const(24, width: 32)) |
+                              tlpLen.zeroExtend(32),
+                      hdr1 <
+                          (tlpTag.zeroExtend(32) << Const(8, width: 32)) |
+                              Const(0xFF, width: 32),
+                      hdr2 < (tlpAddrLo & Const(0xFFFFFFFC, width: 32)),
+                      tlpState <
+                          mux(
+                            bus.dataIn[1],
+                            Const(tWrite, width: 2),
+                            Const(tRead, width: 2),
+                          ),
+                      mAddrReg < tlpBase,
+                      mWdataReg < dbufAt(Const(0, width: 4)),
+                      mWeReg < bus.dataIn[1],
+                      mStbReg < Const(1),
+                    ],
+                  ),
+                ]),
+                // 0x060: TLP_DATA (write fills the buffer, read drains it)
+                CaseItem(Const(0x18, width: 6), [
+                  If(
+                    bus.we,
+                    then: [
+                      for (var i = 0; i < tlpDepth; i++)
+                        If(
+                          tlpWrPtr.eq(Const(i, width: 4)),
+                          then: [dbuf[i] < bus.dataIn],
+                        ),
+                      tlpWrPtr < (tlpWrPtr + Const(1, width: 4)),
+                    ],
+                    orElse: [
+                      bus.dataOut < dbufAt(tlpRdPtr),
+                      tlpRdPtr < (tlpRdPtr + Const(1, width: 4)),
+                    ],
+                  ),
+                ]),
+                // 0x064: TLP_STATUS ([0] busy, [1] done, [15:8] tag)
+                CaseItem(Const(0x19, width: 6), [
+                  bus.dataOut <
+                      tlpBusy.zeroExtend(32) |
+                          (tlpDone.zeroExtend(32) << Const(1, width: 32)) |
+                          (tlpTag.zeroExtend(32) << Const(8, width: 32)),
+                ]),
+                // 0x068/0x06C/0x070: assembled TLP header DWords (read-only)
+                CaseItem(Const(0x1A, width: 6), [bus.dataOut < hdr0]),
+                CaseItem(Const(0x1B, width: 6), [bus.dataOut < hdr1]),
+                CaseItem(Const(0x1C, width: 6), [bus.dataOut < hdr2]),
+                // 0x074: MSI_TRIGGER (write a vector to emit an MSI mem write)
+                CaseItem(Const(0x1D, width: 6), [
+                  If(
+                    bus.we,
+                    then: [
+                      tlpBusy < Const(1),
+                      tlpDone < Const(0),
+                      tlpIdx < Const(0, width: 4),
+                      tlpLen < Const(1, width: 4),
+                      tlpTag < (tlpTag + Const(1, width: 8)),
+                      msiBusy < Const(1),
+                      msiVec < bus.dataIn.getRange(0, 5),
+                      hdr0 <
+                          (Const(0x40, width: 32) << Const(24, width: 32)) |
+                              Const(1, width: 32),
+                      hdr1 <
+                          (tlpTag.zeroExtend(32) << Const(8, width: 32)) |
+                              Const(0xFF, width: 32),
+                      hdr2 < (msiAddr & Const(0xFFFFFFFC, width: 32)),
+                      tlpState < Const(tWrite, width: 2),
+                      mAddrReg < msiAddr.zeroExtend(64),
+                      mWdataReg <
+                          (msiData.zeroExtend(32) |
+                              bus.dataIn.getRange(0, 5).zeroExtend(32)),
+                      mWeReg < Const(1),
+                      mStbReg < Const(1),
+                    ],
+                  ),
+                ]),
               ]),
+            ],
+          ),
+
+          If(
+            ecam.stb & ~ecam.ack,
+            then: [
+              ecam.ack < Const(1),
+              If(
+                // Only 00:00.0 (bus/dev/fn fields all zero) is the host bridge.
+                ecam.addr.getRange(10, 26).eq(Const(0, width: 16)),
+                then: [
+                  Case(ecam.addr.getRange(0, 6), [
+                    // 0x00: vendor / device ID
+                    CaseItem(Const(0x00, width: 6), [
+                      ecam.dataOut < Const(cfgVendorDevice, width: 32),
+                    ]),
+                    // 0x04: command / status
+                    CaseItem(Const(0x01, width: 6), [
+                      If(
+                        ecam.we,
+                        then: [cfgCommand < ecam.dataIn.getRange(0, 16)],
+                        orElse: [ecam.dataOut < cfgCommand.zeroExtend(32)],
+                      ),
+                    ]),
+                    // 0x08: class code / revision
+                    CaseItem(Const(0x02, width: 6), [
+                      ecam.dataOut < Const(cfgClassRev, width: 32),
+                    ]),
+                    // 0x0C: header type (0x01 = bridge)
+                    CaseItem(Const(0x03, width: 6), [
+                      ecam.dataOut < Const(cfgHeaderType, width: 32),
+                    ]),
+                    // 0x10: BAR0 (shared with the controller BAR0 register)
+                    CaseItem(Const(0x04, width: 6), [
+                      If(
+                        ecam.we,
+                        then: [bar0Base < ecam.dataIn],
+                        orElse: [ecam.dataOut < bar0Base],
+                      ),
+                    ]),
+                    // 0x14: BAR1
+                    CaseItem(Const(0x05, width: 6), [
+                      If(
+                        ecam.we,
+                        then: [bar1Base < ecam.dataIn],
+                        orElse: [ecam.dataOut < bar1Base],
+                      ),
+                    ]),
+                    // 0x18: primary/secondary/subordinate bus numbers
+                    CaseItem(Const(0x06, width: 6), [
+                      If(
+                        ecam.we,
+                        then: [cfgBusNumbers < ecam.dataIn],
+                        orElse: [ecam.dataOut < cfgBusNumbers],
+                      ),
+                    ]),
+                    // 0x34: capabilities pointer
+                    CaseItem(Const(0x0D, width: 6), [
+                      ecam.dataOut < Const(cfgCapPtr, width: 32),
+                    ]),
+                    // 0x40: MSI capability header
+                    CaseItem(Const(0x10, width: 6), [
+                      ecam.dataOut < Const(cfgMsiCap, width: 32),
+                    ]),
+                    // 0x44: MSI address (shared with MSI_ADDR register)
+                    CaseItem(Const(0x11, width: 6), [
+                      If(
+                        ecam.we,
+                        then: [msiAddr < ecam.dataIn],
+                        orElse: [ecam.dataOut < msiAddr],
+                      ),
+                    ]),
+                    // 0x4C: MSI data (shared with MSI_DATA register)
+                    CaseItem(Const(0x13, width: 6), [
+                      If(
+                        ecam.we,
+                        then: [msiData < ecam.dataIn.getRange(0, 16)],
+                        orElse: [ecam.dataOut < msiData.zeroExtend(32)],
+                      ),
+                    ]),
+                  ]),
+                ],
+                // Any other function: master abort returns all ones on read.
+                orElse: [ecam.dataOut < Const(0xFFFFFFFF, width: 32)],
+              ),
             ],
           ),
         ],
@@ -410,5 +1004,14 @@ class HarborPcieController extends BridgeModule
       'msi-parent': true,
       'bus-range': [0, 255],
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'PCIE',
+    groupName: 'PCIE',
+    description: 'PCIe root complex or endpoint controller',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

@@ -5,7 +5,7 @@ import 'standard_cell_library.dart';
 /// GlobalFoundries 180nm MCU PDK provider.
 ///
 /// ```dart
-/// final pdk = Gf180mcuProvider(pdkRoot: '$PDK_ROOT/gf180mcuD');
+/// final pdk = Gf180mcuProvider(pdkRoot: '$PDK_ROOT/gf180mcuD')
 /// ```
 class Gf180mcuProvider extends PdkProvider {
   /// Root path to the GF180MCU PDK installation.

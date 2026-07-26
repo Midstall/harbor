@@ -1,6 +1,8 @@
 import 'package:rohd/rohd.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 
+import '../soc/target.dart';
+
 /// Clock domain crossing synchronizer.
 ///
 /// Implements a multi-stage flip-flop synchronizer for safely
@@ -141,11 +143,43 @@ class HarborCdcFifo extends BridgeModule {
   /// FIFO depth (must be power of 2).
   final int depth;
 
-  HarborCdcFifo({this.dataWidth = 32, this.depth = 8, super.name = 'cdc_fifo'})
-    : super('HarborCdcFifo') {
+  /// Free-space margin (in entries) below which [wr_almost_full] asserts. A
+  /// consumer that gates its producer on `~wr_almost_full` can have up to
+  /// [almostFullMargin] pushes already in flight (decided but not yet retired)
+  /// without overflowing, so this must be >= the producer's worst-case
+  /// push-while-deasserting latency. Must be 1.. depth.
+  final int almostFullMargin;
+
+  /// FPGA target. When non-null and [blockRam] is set, the storage array is
+  /// backed by target block RAM instead of flops (see [blockRam]).
+  final HarborDeviceTarget? target;
+
+  /// Back the `depth x dataWidth` storage with block RAM where [target] supports
+  /// it, instead of a flop array: keeps a deep/wide FIFO off the flop budget.
+  /// The gray pointers stay in flops (small). NOTE: not yet implemented. The
+  /// flop array is used regardless, so this is currently accepted-but-ignored
+  /// and safe to set. The BRAM storage path lands with the dual-clock RAMB/DP16KD
+  /// wiring.
+  final bool blockRam;
+
+  HarborCdcFifo({
+    this.dataWidth = 32,
+    this.depth = 8,
+    this.almostFullMargin = 1,
+    this.target,
+    this.blockRam = false,
+    super.name = 'cdc_fifo',
+    // Derive the module definition name from the parameters so that two
+    // differently-sized FIFOs (e.g. a Wishbone-CDC bridge's request and
+    // response paths) do not collide on one reserved definitionName in ROHD.
+  }) : super('HarborCdcFifo_${dataWidth}w${depth}d') {
     assert(
-      depth > 0 && (depth & (depth - 1)) == 0,
-      'FIFO depth must be power of 2',
+      depth >= 2 && (depth & (depth - 1)) == 0,
+      'HarborCdcFifo depth must be a power of 2 and >= 2',
+    );
+    assert(
+      almostFullMargin >= 1 && almostFullMargin <= depth,
+      'almostFullMargin must be in 1..depth',
     );
 
     // Write domain
@@ -154,6 +188,12 @@ class HarborCdcFifo extends BridgeModule {
     createPort('wr_data', PortDirection.input, width: dataWidth);
     createPort('wr_en', PortDirection.input);
     addOutput('wr_full');
+    // Asserted (write domain) when the FIFO has fewer than [almostFullMargin]
+    // free entries left. Conservative: it uses the SYNCHRONIZED read pointer,
+    // so it can only ever OVER-estimate occupancy (the real read side may have
+    // advanced further than the write domain has yet observed), never
+    // under-estimate it, which is exactly the safe direction for back-pressure.
+    addOutput('wr_almost_full');
 
     // Read domain
     createPort('rd_clk', PortDirection.input);
@@ -186,12 +226,47 @@ class HarborCdcFifo extends BridgeModule {
           ].swizzle(),
         );
 
+    // Almost-full (write domain): convert the synchronized read gray pointer
+    // back to binary, compute the occupancy as the modulo-2*depth difference of
+    // the binary write and read pointers, and assert when free space has fallen
+    // below [almostFullMargin]. Using the SYNCHRONIZED (lagging) read pointer
+    // only ever makes occupancy look LARGER than it truly is, so this signal is
+    // conservatively safe for back-pressure (it never under-reports fullness).
+    //
+    // Gray->binary: bin[msb] = gray[msb], bin[i] = bin[i+1] ^ gray[i].
+    final rdBinBits = List<Logic?>.filled(ptrWidth, null);
+    rdBinBits[ptrWidth - 1] = rdPtrGraySync.slice(ptrWidth - 1, ptrWidth - 1);
+    for (var i = ptrWidth - 2; i >= 0; i--) {
+      rdBinBits[i] = rdBinBits[i + 1]! ^ rdPtrGraySync.slice(i, i);
+    }
+    final rdPtrBinSync = rdBinBits.reversed
+        .map((b) => b!)
+        .toList()
+        .swizzle()
+        .named('rd_ptr_bin_sync');
+    // Occupancy modulo 2*depth (ptrWidth bits wrap correctly under subtraction).
+    final occupancy = (wrPtr - rdPtrBinSync).named('fifo_occupancy');
+    // free < margin  <=>  occupancy > depth - margin.
+    output('wr_almost_full') <=
+        occupancy.gt(Const(depth - almostFullMargin, width: ptrWidth));
+
     // Empty: read gray == write gray
     output('rd_empty') <= rdPtrGray.eq(wrPtrGraySync);
 
     // Write domain logic
     final wrClk = input('wr_clk');
     final wrReset = input('wr_reset');
+
+    // Storage memory: `depth` entries of `dataWidth` bits. Written in the write
+    // domain at the low (non-wrap) bits of the write pointer, read combinational
+    // in the read domain at the low bits of the read pointer. The extra wrap bit
+    // of the pointers (used only for full/empty detection) is dropped here.
+    final addrWidth = ptrWidth - 1;
+    final mem = <Logic>[
+      for (var i = 0; i < depth; i++) Logic(name: 'mem_$i', width: dataWidth),
+    ];
+    final wrAddr = wrPtr.getRange(0, addrWidth);
+    final wrPush = input('wr_en') & ~output('wr_full');
 
     // Synchronize read pointer gray to write domain
     final rdGraySync0 = Logic(name: 'rd_gray_sync0', width: ptrWidth);
@@ -206,7 +281,15 @@ class HarborCdcFifo extends BridgeModule {
         orElse: [
           rdGraySync0 < rdPtrGray,
           rdPtrGraySync < rdGraySync0,
-          If(input('wr_en') & ~output('wr_full'), then: [wrPtr < wrPtr + 1]),
+          If(
+            wrPush,
+            then: [
+              wrPtr < wrPtr + 1,
+              // Write data into the addressed memory entry.
+              for (var i = 0; i < depth; i++)
+                If(wrAddr.eq(i), then: [mem[i] < input('wr_data')]),
+            ],
+          ),
         ],
       ),
     ]);
@@ -232,8 +315,19 @@ class HarborCdcFifo extends BridgeModule {
       ),
     ]);
 
-    // Memory would be inferred by synthesis
-    output('rd_data') <= Const(0, width: dataWidth); // placeholder
+    // Combinational read: mux the addressed memory entry onto rd_data using the
+    // low (non-wrap) bits of the read pointer.
+    final rdAddr = rdPtr.getRange(0, addrWidth);
+    Combinational([
+      Case(
+        rdAddr,
+        [
+          for (var i = 0; i < depth; i++)
+            CaseItem(Const(i, width: addrWidth), [output('rd_data') < mem[i]]),
+        ],
+        defaultItem: [output('rd_data') < Const(0, width: dataWidth)],
+      ),
+    ]);
   }
 
   static int _log2(int val) {

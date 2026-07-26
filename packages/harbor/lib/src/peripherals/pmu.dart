@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 import '../util/pretty_string.dart';
 
 /// Power domain state.
@@ -85,7 +86,10 @@ class HarborPmuConfig with HarborPrettyString {
 ///   - +0x04: DOM_STATUS (current state, transition busy)
 ///   - +0x08: DOM_ISO    (isolation control)
 class HarborPowerManagementUnit extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// PMU configuration.
   final HarborPmuConfig config;
 
@@ -285,5 +289,14 @@ class HarborPowerManagementUnit extends BridgeModule
       '#power-domain-cells': 1,
       'num-domains': config.domains.length,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'PMU',
+    groupName: 'PMU',
+    description: 'Power Management Unit',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

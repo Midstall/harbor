@@ -9,9 +9,9 @@ typedef PluginFactory = FiberPlugin Function(Map<String, dynamic> json);
 /// ```dart
 /// final registry = PluginRegistry()
 ///   ..register('IntAlu', (json) => IntAluPlugin.fromJson(json))
-///   ..register('Decoder', (json) => DecoderPlugin.fromJson(json));
+///   ..register('Decoder', (json) => DecoderPlugin.fromJson(json))
 ///
-/// final host = PluginHost.fromJson(json, registry);
+/// final host = PluginHost.fromJson(json, registry)
 /// ```
 class PluginRegistry {
   final Map<String, PluginFactory> _factories = {};

@@ -19,13 +19,13 @@ import 'operation.dart';
 /// final decoder = RiscVInstructionDecoder(
 ///   isaConfig,
 ///   instructionInput: fetchedInstruction,
-/// );
-/// await decoder.build();
+/// )
+/// await decoder.build()
 ///
 /// // Use decoded outputs
-/// final isIllegal = decoder.illegal;
-/// final opIndex = decoder.operationIndex;
-/// final rdAddr = decoder.rdField;
+/// final isIllegal = decoder.illegal
+/// final opIndex = decoder.operationIndex
+/// final rdAddr = decoder.rdField
 /// ```
 class RiscVInstructionDecoder extends Module {
   /// The ISA this decoder was generated from.
@@ -108,7 +108,7 @@ class RiscVInstructionDecoder extends Module {
     final iImm = instr.getRange(20, 32).signExtend(xlen);
     immediateField <= iImm;
 
-    // RiscVOperation matching - generate a priority case from all operations
+    // RiscVOperation matching: generate a priority case from all operations
     if (ops.isEmpty) {
       illegal <= Const(1);
       operationIndex <= Const(0, width: indexWidth);

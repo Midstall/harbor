@@ -9,19 +9,13 @@ import '../resource.dart';
 const _int = RiscVIntRegFile(32);
 const _fp32 = RiscVFloatRegFile(32);
 
-// -- Zicntr: Base counters and timers --
-
-/// Zicntr - Base counters and timers (cycle, time, instret CSRs).
+/// Zicntr: Base counters and timers (cycle, time, instret CSRs).
 const rvZicntr = RiscVExtension(name: 'Zicntr', key: null, misaBit: null);
 
-// -- Zihpm: Hardware performance counters --
-
-/// Zihpm - Hardware performance counters (hpmcounter3-31).
+/// Zihpm: Hardware performance counters (hpmcounter3-31).
 const rvZihpm = RiscVExtension(name: 'Zihpm', key: null, misaBit: null);
 
-// -- Zihintpause: Pause hint --
-
-/// Zihintpause - PAUSE hint instruction.
+/// Zihintpause: PAUSE hint instruction.
 final rvZihintpause = RiscVExtension(
   name: 'Zihintpause',
   key: null,
@@ -37,9 +31,7 @@ final rvZihintpause = RiscVExtension(
   ],
 );
 
-// -- Zihintntl: Non-temporal locality hints --
-
-/// Zihintntl - Non-temporal locality hints (NTL.P1, NTL.PALL, NTL.S1, NTL.ALL).
+/// Zihintntl: Non-temporal locality hints (NTL.P1, NTL.PALL, NTL.S1, NTL.ALL).
 final rvZihintntl = RiscVExtension(
   name: 'Zihintntl',
   key: null,
@@ -80,19 +72,13 @@ final rvZihintntl = RiscVExtension(
   ],
 );
 
-// -- Zimop: May-be-operations --
-
-/// Zimop - May-be-operations (reserved encoding space).
+/// Zimop: May-be-operations (reserved encoding space).
 const rvZimop = RiscVExtension(name: 'Zimop', key: null, misaBit: null);
 
-// -- Zcmop: Compressed may-be-operations --
-
-/// Zcmop - Compressed may-be-operations.
+/// Zcmop: Compressed may-be-operations.
 const rvZcmop = RiscVExtension(name: 'Zcmop', key: null, misaBit: null);
 
-// -- Zawrs: Wait-on-reservation-set --
-
-/// Zawrs - Wait-on-reservation-set instructions.
+/// Zawrs: Wait-on-reservation-set instructions.
 final rvZawrs = RiscVExtension(
   name: 'Zawrs',
   key: null,
@@ -121,31 +107,25 @@ final rvZawrs = RiscVExtension(
   ],
 );
 
-// -- Zkt: Data-independent execution latency --
-
-/// Zkt - Data-independent execution latency (constant-time crypto).
+/// Zkt: Data-independent execution latency (constant-time crypto).
 const rvZkt = RiscVExtension(name: 'Zkt', key: null, misaBit: null);
 
-// -- Zvfhmin, Zvbb, Zvkt: Vector sub-extensions --
-
-/// Zvfhmin - Vector minimal half-precision floating-point.
+/// Zvfhmin: Vector minimal half-precision floating-point.
 const rvZvfhmin = RiscVExtension(name: 'Zvfhmin', key: null, misaBit: null);
 
-/// Zvfh - Vector half-precision floating-point (SEW=16 FP arithmetic). A marker
+/// Zvfh: Vector half-precision floating-point (SEW=16 FP arithmetic). A marker
 /// extension: the OP-FP-V ops (vfadd.vv etc.) are SEW-generic and decode the same
 /// for any SEW, so the half-precision capability is signalled by including this
 /// in the ISA config rather than by distinct operations.
 const rvZvfh = RiscVExtension(name: 'Zvfh', key: null, misaBit: null);
 
-/// Zvbb - Vector basic bit-manipulation instructions.
+/// Zvbb: Vector basic bit-manipulation instructions.
 const rvZvbb = RiscVExtension(name: 'Zvbb', key: null, misaBit: null);
 
-/// Zvkt - Vector data-independent execution latency.
+/// Zvkt: Vector data-independent execution latency.
 const rvZvkt = RiscVExtension(name: 'Zvkt', key: null, misaBit: null);
 
-// -- Zicbom/Zicbop/Zicboz: Cache block operations --
-
-/// Zicbom - Cache-block management instructions.
+/// Zicbom: Cache-block management instructions.
 final rvZicbom = RiscVExtension(
   name: 'Zicbom',
   key: null,
@@ -190,7 +170,7 @@ final rvZicbom = RiscVExtension(
   ],
 );
 
-/// Zicbop - Cache-block prefetch instructions.
+/// Zicbop: Cache-block prefetch instructions.
 final rvZicbop = RiscVExtension(
   name: 'Zicbop',
   key: null,
@@ -223,7 +203,7 @@ final rvZicbop = RiscVExtension(
   ],
 );
 
-/// Zicboz - Cache-block zero instructions.
+/// Zicboz: Cache-block zero instructions.
 final rvZicboz = RiscVExtension(
   name: 'Zicboz',
   key: null,
@@ -244,9 +224,7 @@ final rvZicboz = RiscVExtension(
   ],
 );
 
-// -- Zcb: Additional compressed instructions --
-
-/// Zcb - Additional 16-bit compressed instructions.
+/// Zcb: Additional 16-bit compressed instructions.
 final rvZcb = RiscVExtension(
   name: 'Zcb',
   key: null,
@@ -517,9 +495,7 @@ final rvZcb = RiscVExtension(
   ],
 );
 
-// -- Zfa: Additional floating-point instructions --
-
-/// Zfa - Additional floating-point instructions.
+/// Zfa: Additional floating-point instructions.
 final rvZfa = RiscVExtension(
   name: 'Zfa',
   key: null,
@@ -608,9 +584,7 @@ final rvZfa = RiscVExtension(
   ],
 );
 
-// -- Svinval: Fine-grained TLB invalidation --
-
-/// Svinval - Fine-grained address-translation cache invalidation.
+/// Svinval: Fine-grained address-translation cache invalidation.
 final rvSvinval = RiscVExtension(
   name: 'Svinval',
   key: null,
@@ -677,58 +651,56 @@ final rvSvinval = RiscVExtension(
   ],
 );
 
-// -- Config-only extensions --
-
-/// Svnapot - NAPOT translation contiguity.
+/// Svnapot: NAPOT translation contiguity.
 const rvSvnapot = RiscVExtension(name: 'Svnapot', key: null, misaBit: null);
 
-/// Svpbmt - Page-based memory types.
+/// Svpbmt: Page-based memory types.
 const rvSvpbmt = RiscVExtension(name: 'Svpbmt', key: null, misaBit: null);
 
-/// Sstc - Supervisor-mode timer interrupts (stimecmp CSR).
+/// Sstc: Supervisor-mode timer interrupts (stimecmp CSR).
 const rvSstc = RiscVExtension(name: 'Sstc', key: null, misaBit: null);
 
-/// Sscofpmf - Count overflow and mode-based filtering.
+/// Sscofpmf: Count overflow and mode-based filtering.
 const rvSscofpmf = RiscVExtension(name: 'Sscofpmf', key: null, misaBit: null);
 
-/// Svbare - Bare satp mode support.
+/// Svbare: Bare satp mode support.
 const rvSvbare = RiscVExtension(name: 'Svbare', key: null, misaBit: null);
 
-/// Svade - A/D bit page-fault exceptions.
+/// Svade: A/D bit page-fault exceptions.
 const rvSvade = RiscVExtension(name: 'Svade', key: null, misaBit: null);
 
-/// Svadu - hardware updating of page-table A/D bits (the alternative to Svade,
+/// Svadu: hardware updating of page-table A/D bits (the alternative to Svade,
 /// which faults instead). The MMU sets Accessed/Dirty during a successful walk.
 const rvSvadu = RiscVExtension(name: 'Svadu', key: null, misaBit: null);
 
-/// Smstateen - machine-level state-enable CSRs (mstateen0-3[h]) gating access to
+/// Smstateen: machine-level state-enable CSRs (mstateen0-3[h]) gating access to
 /// extension state from lower privilege levels.
 const rvSmstateen = RiscVExtension(name: 'Smstateen', key: null, misaBit: null);
 
-/// Ssstateen - the supervisor-visible view of the state-enable CSRs
-/// (sstateen0-3); requires [rvSmstateen].
+/// Ssstateen: the supervisor-visible view of the state-enable CSRs
+/// (sstateen0-3), requires [rvSmstateen].
 const rvSsstateen = RiscVExtension(name: 'Ssstateen', key: null, misaBit: null);
 
-/// Ziccif - Instruction fetch atomicity in coherent cacheable regions.
+/// Ziccif: Instruction fetch atomicity in coherent cacheable regions.
 const rvZiccif = RiscVExtension(name: 'Ziccif', key: null, misaBit: null);
 
-/// Ziccrse - RsrvEventual in coherent cacheable regions.
+/// Ziccrse: RsrvEventual in coherent cacheable regions.
 const rvZiccrse = RiscVExtension(name: 'Ziccrse', key: null, misaBit: null);
 
-/// Ziccamoa - AMOArithmetic in coherent cacheable regions.
+/// Ziccamoa: AMOArithmetic in coherent cacheable regions.
 const rvZiccamoa = RiscVExtension(name: 'Ziccamoa', key: null, misaBit: null);
 
-/// Zicclsm - Misaligned loads/stores in coherent cacheable regions.
+/// Zicclsm: Misaligned loads/stores in coherent cacheable regions.
 const rvZicclsm = RiscVExtension(name: 'Zicclsm', key: null, misaBit: null);
 
-/// Za64rs - Reservation sets contiguous, aligned, max 64 bytes.
+/// Za64rs: Reservation sets contiguous, aligned, max 64 bytes.
 const rvZa64rs = RiscVExtension(name: 'Za64rs', key: null, misaBit: null);
 
-/// Zic64b - Cache blocks 64 bytes, naturally aligned.
+/// Zic64b: Cache blocks 64 bytes, naturally aligned.
 const rvZic64b = RiscVExtension(name: 'Zic64b', key: null, misaBit: null);
 
-/// Supm - User-mode pointer masking.
+/// Supm: User-mode pointer masking.
 const rvSupm = RiscVExtension(name: 'Supm', key: null, misaBit: null);
 
-/// Sha - Augmented hypervisor extension.
+/// Sha: Augmented hypervisor extension.
 const rvSha = RiscVExtension(name: 'Sha', key: null, misaBit: null);

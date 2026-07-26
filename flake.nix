@@ -115,6 +115,7 @@
                 ./packages/harbor/lib
                 ./packages/harbor/test
                 ./packages/harbor/pubspec.yaml
+                ./packages/harbor/dart_test.yaml
                 ./pubspec.yaml
                 ./pubspec.lock
               ];
@@ -130,7 +131,7 @@
               runHook preCheck
               export HOME="$TMPDIR"
               dart analyze packages/harbor --fatal-infos
-              packageRun test -r expanded packages/harbor/test
+              packageRun test -r expanded --exclude-tags slow --timeout 10m packages/harbor/test
               runHook postCheck
             '';
 

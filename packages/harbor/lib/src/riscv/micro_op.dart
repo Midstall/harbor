@@ -1,7 +1,7 @@
 /// Micro-operation types for RISC-V instruction execution.
 ///
 /// Each [RiscVOperation] carries a list of [RiscVMicroOp]s describing its
-/// execution steps. These are pure data - the actual hardware
+/// execution steps. These are pure data. The actual hardware
 /// implementation is provided by the CPU (e.g., River).
 
 /// Fields in the micro-op data path.
@@ -125,7 +125,7 @@ enum RiscVMemSize {
 }
 
 /// Atomic memory operation functions.
-// `cas` is Zacas (amocas.w/.d): compare mem against rd; if equal store rs2; rd<-mem.
+// `cas` is Zacas (amocas.w/.d): compare mem against rd, if equal store rs2, rd<-mem.
 enum RiscVAtomicFunct { add, swap, xor_, and_, or_, min, max, minu, maxu, cas }
 
 /// Floating-point rounding modes.

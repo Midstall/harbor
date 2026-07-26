@@ -19,7 +19,7 @@ enum RiscVExecutionMode {
 
 /// A single RISC-V instruction definition.
 ///
-/// Declarative and const - describes everything the framework
+/// Declarative and const: describes everything the framework
 /// needs to know about an instruction: its encoding, what
 /// resources it uses, how it executes, and which XLEN values
 /// it's valid for.
@@ -43,7 +43,7 @@ enum RiscVExecutionMode {
 ///     RiscVWriteRegister(RiscVMicroOpField.rd, RiscVMicroOpSource.alu),
 ///     RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
 ///   ],
-/// );
+/// )
 /// ```
 class RiscVOperation {
   /// Human-readable mnemonic (e.g., `'add'`, `'lw'`, `'beq'`).
@@ -101,7 +101,7 @@ class RiscVOperation {
   final int? zeroMask;
 
   /// Forces a register operand to a fixed index regardless of the encoding,
-  /// for instructions with implicit registers (e.g. c.jal/c.jalr link to x1;
+  /// for instructions with implicit registers (e.g. c.jal/c.jalr link to x1,
   /// c.lwsp/c.swsp/c.addi16sp/c.addi4spn use x2/sp as the base). Applied at
   /// decode after the format-derived register fields.
   final int? fixedRd;

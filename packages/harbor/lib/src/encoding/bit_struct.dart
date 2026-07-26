@@ -40,7 +40,7 @@ class HarborBitRange {
   int get hashCode => Object.hash(start, end);
 }
 
-/// A structured bit layout - maps named fields to [HarborBitRange]s within
+/// A structured bit layout: maps named fields to [HarborBitRange]s within
 /// a fixed-width word.
 ///
 /// Provides both integer encode/decode for software-level use AND
@@ -173,7 +173,7 @@ class HarborBitStruct with HarborPrettyString {
 /// A hardware view of a [HarborBitStruct] over a [Logic] signal.
 ///
 /// Provides named field access as [Logic] slices. Each field
-/// returns a slice of the underlying signal - no copies.
+/// returns a slice of the underlying signal: no copies.
 ///
 /// ```dart
 /// final view = rType.view(instruction);
@@ -193,7 +193,7 @@ class HarborBitStructView {
 
   /// Gets the [Logic] slice for field [name].
   ///
-  /// Slices are cached - multiple accesses return the same [Logic].
+  /// Slices are cached: multiple accesses return the same [Logic].
   Logic operator [](String name) {
     return _cache.putIfAbsent(name, () {
       final range = struct.fields[name];

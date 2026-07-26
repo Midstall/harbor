@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// RISC-V Advanced Platform-Level Interrupt Controller (APLIC).
 ///
@@ -22,7 +23,10 @@ import '../soc/device_tree.dart';
 /// - IDC per hart:    0x4000 + hart*32
 ///   - `idelivery` +0x00, `iforce` +0x04, `ithreshold` +0x08, `claimi` +0x1C
 class HarborAplic extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   final int sources;
   final int harts;
   final int priorityBits;
@@ -332,5 +336,14 @@ class HarborAplic extends BridgeModule
       'interrupt-controller': true,
       '#interrupt-cells': 2,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'APLIC',
+    groupName: 'APLIC',
+    description: 'RISC-V Advanced Platform-Level Interrupt Controller',
+    baseAddress: baseAddress,
+    size: 0x8000,
   );
 }

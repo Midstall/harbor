@@ -58,11 +58,20 @@ class HarborAcpiGenerator {
   /// Peripheral nodes implementing [HarborAcpiDeviceProvider].
   final List<HarborAcpiDeviceProvider> peripherals;
 
+  /// Interrupt numbers assigned to peripherals by the SoC's allocator, keyed
+  /// by provider.
+  ///
+  /// When a provider has an entry here it overrides the device's own
+  /// [HarborAcpiDevice.interrupts], so interrupt numbering lives in one place
+  /// rather than being hardcoded per peripheral.
+  final Map<HarborAcpiDeviceProvider, List<int>> interrupts;
+
   const HarborAcpiGenerator({
     required this.oemId,
     required this.oemTableId,
     this.cpus = const [],
     this.peripherals = const [],
+    this.interrupts = const {},
   });
 
   /// ACPI device nodes from the peripherals.
@@ -89,10 +98,11 @@ class HarborAcpiGenerator {
 
     if (cpus.isNotEmpty && peripherals.isNotEmpty) buf.writeln();
 
-    final devs = devices;
-    for (var i = 0; i < devs.length; i++) {
+    for (var i = 0; i < peripherals.length; i++) {
       if (i > 0) buf.writeln();
-      _writeDevice(buf, devs[i], i);
+      final provider = peripherals[i];
+      final dev = provider.acpiDevice;
+      _writeDevice(buf, dev, i, interrupts[provider] ?? dev.interrupts);
     }
 
     buf.writeln('    }');
@@ -119,7 +129,12 @@ class HarborAcpiGenerator {
     buf.writeln('        }');
   }
 
-  void _writeDevice(StringBuffer buf, HarborAcpiDevice dev, int index) {
+  void _writeDevice(
+    StringBuffer buf,
+    HarborAcpiDevice dev,
+    int index,
+    List<int> irqs,
+  ) {
     final name = _nameSeg('D', index);
     buf.writeln('        Device ($name)');
     buf.writeln('        {');
@@ -135,20 +150,20 @@ class HarborAcpiGenerator {
     buf.writeln('            Name (_UID, ${_hex(dev.uid)})');
     buf.writeln('            Name (_STA, 0x0F)');
 
-    if (dev.memory.isNotEmpty || dev.interrupts.isNotEmpty) {
+    if (dev.memory.isNotEmpty || irqs.isNotEmpty) {
       buf.writeln('            Name (_CRS, ResourceTemplate ()');
       buf.writeln('            {');
       for (final region in dev.memory) {
         _writeMemory(buf, region);
       }
-      if (dev.interrupts.isNotEmpty) {
-        final irqs = dev.interrupts.map(_hex).join(', ');
+      if (irqs.isNotEmpty) {
+        final irqList = irqs.map(_hex).join(', ');
         buf.writeln(
           '                Interrupt (ResourceConsumer, Level, ActiveHigh, '
           'Exclusive)',
         );
         buf.writeln('                {');
-        buf.writeln('                    $irqs');
+        buf.writeln('                    $irqList');
         buf.writeln('                }');
       }
       buf.writeln('            })');

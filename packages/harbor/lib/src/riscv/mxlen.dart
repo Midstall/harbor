@@ -1,6 +1,6 @@
 /// RISC-V base integer register width.
 ///
-/// Parameterizes the entire ISA - instruction encoding, register
+/// Parameterizes the entire ISA: instruction encoding, register
 /// widths, address sizes, and available paging modes all depend
 /// on the selected XLEN.
 enum RiscVMxlen {

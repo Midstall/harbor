@@ -192,7 +192,7 @@ final rv32i = RiscVExtension(
       funct3: 0x0,
       funct7: 0x00,
       // ecall and ebreak share opcode/funct3/funct7 and differ only in funct12
-      // bit 20 (ecall=0, ebreak=1); without this discriminator both decode as
+      // bit 20 (ecall=0, ebreak=1), without this discriminator both decode as
       // the first-listed op (ecall), so ebreak would wrongly trap as ecall.
       matchMask: 0x00100000,
       matchValue: 0x00000000,

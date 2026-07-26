@@ -173,7 +173,7 @@ class HarborPageTableWalker extends BridgeModule {
               If(
                 level.eq(Const(0, width: 3)),
                 then: [
-                  // Reached bottom level without leaf - fault
+                  // Reached bottom level without leaf: fault
                   state < Const(HarborPtwState.fault.index, width: 3),
                 ],
                 orElse: [

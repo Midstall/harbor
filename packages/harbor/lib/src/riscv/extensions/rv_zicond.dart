@@ -26,8 +26,8 @@ RiscVOperation _czero(String m, int f3, RiscVAluFunct f) => RiscVOperation(
   ],
 );
 
-/// Zicond - Conditional zero instructions.
-/// czero.eqz rd = (rs2 == 0) ? 0 : rs1 ; czero.nez rd = (rs2 != 0) ? 0 : rs1.
+/// Zicond: Conditional zero instructions.
+/// czero.eqz rd = (rs2 == 0) ? 0 : rs1. czero.nez rd = (rs2 != 0) ? 0 : rs1.
 final rvZicond = RiscVExtension(
   name: 'Zicond',
   key: null,

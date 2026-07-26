@@ -37,10 +37,10 @@ class BusAddressRange {
 
 /// Arbitration strategy for multi-master buses.
 enum BusArbitration {
-  /// Fixed priority - lower index wins.
+  /// Fixed priority: lower index wins.
   fixed,
 
-  /// Round-robin - each master gets a turn.
+  /// Round-robin: each master gets a turn.
   roundRobin,
 
   /// Priority-based with explicit priority values.

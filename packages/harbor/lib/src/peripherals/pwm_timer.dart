@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// PWM/Timer peripheral.
 ///
@@ -22,7 +23,10 @@ import '../soc/device_tree.dart';
 /// - 0x00: GLOBAL_CTRL (global enable)
 /// - 0x04: INT_STATUS  (per-channel interrupt status, W1C)
 class HarborPwmTimer extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Number of timer/PWM channels.
   final int channels;
 
@@ -276,5 +280,14 @@ class HarborPwmTimer extends BridgeModule
       '#pwm-cells': 3,
       'num-channels': channels,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'PWM',
+    groupName: 'PWM',
+    description: 'PWM and timer peripheral',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

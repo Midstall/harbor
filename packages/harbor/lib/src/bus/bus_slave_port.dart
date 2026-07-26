@@ -43,17 +43,17 @@ class BusSlavePort {
   /// Read data signal (to master).
   final Logic dataOut;
 
-  /// Strobe/valid signal (from master - transaction active).
+  /// Strobe/valid signal (from master, transaction active).
   final Logic stb;
 
-  /// Write enable (from master - 1=write, 0=read).
+  /// Write enable (from master, 1=write, 0=read).
   final Logic we;
 
   /// Byte-lane selects (from master, one bit per byte of [dataIn]). On
   /// Wishbone this is SEL, on TileLink the A-channel mask.
   final Logic sel;
 
-  /// Acknowledge (to master - transaction complete).
+  /// Acknowledge (to master, transaction complete).
   final Logic ack;
 
   /// Error signal (to master, optional).

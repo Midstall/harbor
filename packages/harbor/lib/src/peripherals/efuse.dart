@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// eFuse bank configuration.
 class HarborEfuseConfig {
@@ -31,11 +32,11 @@ class HarborEfuseConfig {
   int get words => totalBits ~/ bitsPerWord;
 }
 
-/// Raw eFuse block - direct interface to the OTP fuse array.
+/// Raw eFuse block: direct interface to the OTP fuse array.
 ///
 /// Provides the low-level read/program signals that connect
 /// directly to the PDK eFuse cells. No bus interface or
-/// register abstraction - that's [HarborEfuseDevice]'s job.
+/// register abstraction: that's [HarborEfuseDevice]'s job.
 ///
 /// On ASIC, the fuse cell interface connects to the analog
 /// eFuse macros from `PdkProvider.efuse()`.
@@ -173,7 +174,7 @@ class HarborEfuseBlock extends BridgeModule {
   }
 }
 
-/// eFuse MMIO device - bus-accessible interface to the fuse block.
+/// eFuse MMIO device: bus-accessible interface to the fuse block.
 ///
 /// Wraps [HarborEfuseBlock] with a register interface for
 /// software access. Provides address/data registers, status,
@@ -191,7 +192,10 @@ class HarborEfuseBlock extends BridgeModule {
 /// - 0x18: TIMING     (program pulse width in clock cycles)
 /// - 0x1C: KEY        (write 0x4F545021 to unlock programming)
 class HarborEfuseDevice extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -463,5 +467,14 @@ class HarborEfuseDevice extends BridgeModule
       '#address-cells': 1,
       '#size-cells': 1,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'EFUSE',
+    groupName: 'EFUSE',
+    description: 'eFuse OTP MMIO device',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

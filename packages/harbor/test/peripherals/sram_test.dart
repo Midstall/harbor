@@ -1,7 +1,12 @@
 import 'package:harbor/harbor.dart';
+import 'package:rohd/rohd.dart';
 import 'package:test/test.dart';
 
 void main() {
+  tearDown(() async {
+    await Simulator.reset();
+  });
+
   group('HarborSram', () {
     test('creates with size and baseAddress', () {
       final sram = HarborSram(baseAddress: 0x80000000, size: 4096);
@@ -39,6 +44,36 @@ void main() {
         dataWidth: 64,
       );
       expect(sram.dataWidth, equals(64));
+    });
+  });
+
+  group('HarborSram FPGA backends', () {
+    test('Spartan 7 emits RAMB36E1 and no Lattice primitives', () async {
+      final sram = HarborSram(
+        baseAddress: 0x80000000,
+        size: 4096,
+        target: const HarborFpgaTarget.spartan7(
+          device: 's50',
+          package: 'csga324',
+        ),
+      );
+      await sram.build();
+      final sv = sram.generateSynth();
+      expect(sv, contains('RAMB36E1'));
+      expect(sv, isNot(contains('DP16KD')));
+      expect(sv, isNot(contains('SPRAM')));
+    });
+
+    test('ECP5 still emits DP16KD, not Xilinx primitives', () async {
+      final sram = HarborSram(
+        baseAddress: 0x80000000,
+        size: 4096,
+        target: const HarborFpgaTarget.ecp5(device: '25f', package: 'CABGA256'),
+      );
+      await sram.build();
+      final sv = sram.generateSynth();
+      expect(sv, contains('DP16KD'));
+      expect(sv, isNot(contains('RAMB36E1')));
     });
   });
 }

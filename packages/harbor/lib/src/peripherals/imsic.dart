@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// RISC-V Incoming MSI Controller (IMSIC).
 ///
@@ -28,7 +29,10 @@ import '../soc/device_tree.dart';
 /// by devices. Writing an interrupt identity to seteipnum sets the
 /// corresponding pending bit.
 class HarborImsic extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address for this hart's IMSIC.
   final int baseAddress;
 
@@ -194,5 +198,14 @@ class HarborImsic extends BridgeModule
       'interrupt-controller': true,
       'msi-controller': true,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'IMSIC',
+    groupName: 'IMSIC',
+    description: 'RISC-V Incoming MSI Controller',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

@@ -24,15 +24,26 @@ class HarborSoCGraphGenerator {
   /// Peripheral nodes.
   final List<HarborDeviceTreeNodeProvider> peripherals;
 
+  /// Interrupt numbers assigned to peripherals by the SoC's allocator, keyed
+  /// by provider. Overrides a node's own interrupts when present.
+  final Map<HarborDeviceTreeNodeProvider, List<int>> interrupts;
+
   const HarborSoCGraphGenerator({
     required this.name,
     this.cpus = const [],
     this.peripherals = const [],
+    this.interrupts = const {},
   });
 
   /// All device tree nodes from the peripherals.
   List<HarborDeviceTreeNode> get _nodes =>
       peripherals.map((p) => p.dtNode).toList();
+
+  /// Each peripheral's node paired with its effective interrupt numbers.
+  List<({HarborDeviceTreeNode node, List<int> irqs})> get _entries => [
+    for (final p in peripherals)
+      (node: p.dtNode, irqs: interrupts[p] ?? p.dtNode.interrupts),
+  ];
 
   /// Generates a Mermaid flowchart diagram.
   String mermaid() {
@@ -71,15 +82,15 @@ class HarborSoCGraphGenerator {
       buf.writeln('    bus -- "$addrHex ($sizeHex)" --> $id');
     }
 
-    for (final n in nodes) {
-      if (n.interrupts.isNotEmpty) {
+    for (final e in _entries) {
+      if (e.irqs.isNotEmpty) {
         final controller = nodes
             .where((c) => c.interruptController)
             .firstOrNull;
         if (controller != null) {
-          final srcId = _sanitizeId(n.nodeName);
+          final srcId = _sanitizeId(e.node.nodeName);
           final ctrlId = _sanitizeId(controller.nodeName);
-          final irqs = n.interrupts.join(',');
+          final irqs = e.irqs.join(',');
           buf.writeln('    $srcId -. "IRQ $irqs" .-> $ctrlId');
         }
       }
@@ -148,15 +159,15 @@ class HarborSoCGraphGenerator {
     }
     buf.writeln();
 
-    for (final n in nodes) {
-      if (n.interrupts.isNotEmpty) {
+    for (final e in _entries) {
+      if (e.irqs.isNotEmpty) {
         final controller = nodes
             .where((c) => c.interruptController)
             .firstOrNull;
         if (controller != null) {
-          final srcId = _sanitizeId(n.nodeName);
+          final srcId = _sanitizeId(e.node.nodeName);
           final ctrlId = _sanitizeId(controller.nodeName);
-          final irqs = n.interrupts.join(',');
+          final irqs = e.irqs.join(',');
           buf.writeln(
             '    $srcId -> $ctrlId '
             '[label="IRQ $irqs", style=dashed, color=red];',

@@ -42,6 +42,32 @@ void main() {
       expect(dts, contains('clock-frequency'));
     });
 
+    test('emits a device_type=memory root node for RAM spans', () {
+      final dts = HarborDeviceTreeGenerator(
+        model: 'Mem SoC',
+        compatible: 'test,mem-v1',
+        cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
+        memories: [BusAddressRange(0x80000000, 0x08000000)],
+      ).generate();
+
+      // A root memory node (not under /soc) an OS can discover.
+      expect(dts, contains('memory@80000000 {'));
+      expect(dts, contains('device_type = "memory";'));
+      expect(dts, contains('reg = <0x80000000 0x8000000>;'));
+    });
+
+    test('emits timebase-frequency when the CPU carries it', () {
+      final dts = HarborDeviceTreeGenerator(
+        model: 'Timed SoC',
+        compatible: 'test,timed-v1',
+        cpus: [
+          HarborCpu(hartId: 0, isa: 'rv64imac', timebaseFrequency: 25000000),
+        ],
+      ).generate();
+
+      expect(dts, contains('timebase-frequency = <25000000>;'));
+    });
+
     test('generates minimal DTS without CPUs', () {
       final dts = HarborDeviceTreeGenerator(
         model: 'Minimal',

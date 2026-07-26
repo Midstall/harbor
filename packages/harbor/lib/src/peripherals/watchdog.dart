@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// HarborWatchdog timer peripheral.
 ///
@@ -22,7 +23,10 @@ import '../soc/device_tree.dart';
 ///
 /// Magic kick value prevents accidental kicks from stray writes.
 class HarborWatchdog extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -208,5 +212,14 @@ class HarborWatchdog extends BridgeModule
     properties: {
       'compatible': ['harbor,watchdog'],
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'WDT',
+    groupName: 'WDT',
+    description: 'Watchdog timer',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

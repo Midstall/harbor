@@ -12,9 +12,9 @@ import 'stage.dart';
 /// ```dart
 /// enum MyStage with HarborPipelineStage { fetch, decode, execute }
 ///
-/// final fetchNode = HarborNode(MyStage.fetch);
-/// fetchNode.insert(pc);
-/// fetchNode.insert(instruction);
+/// final fetchNode = HarborNode(MyStage.fetch)
+/// fetchNode.insert(pc)
+/// fetchNode.insert(instruction)
 /// ```
 class HarborNode<S extends HarborPipelineStage> {
   /// The typed stage identifier for this node.

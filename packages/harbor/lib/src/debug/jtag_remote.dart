@@ -184,7 +184,7 @@ Future<JtagRemote> startJtagRemote({
     port: port,
     onTick: onTick,
   );
-  // Start in background - don't await, it runs until stop()
+  // Start in background. Don't await, it runs until stop()
   unawaited(server.start());
   return server;
 }

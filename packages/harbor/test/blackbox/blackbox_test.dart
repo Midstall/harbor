@@ -78,7 +78,10 @@ void main() {
     });
 
     test('IO buffers create correctly', () {
-      expect(Ecp5Bb().definitionName, equals('BB'));
+      expect(
+        Ecp5Bb(i: Logic(), t: Logic(), b: LogicNet()).definitionName,
+        equals('BB'),
+      );
       expect(Ecp5Ib().definitionName, equals('IB'));
       expect(Ecp5Ob().definitionName, equals('OB'));
     });

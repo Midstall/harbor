@@ -1,0 +1,227 @@
+import 'package:rohd/rohd.dart';
+import 'package:rohd_bridge/rohd_bridge.dart';
+
+import '../soc/target.dart';
+import 'cdc.dart';
+
+/// Wishbone clock-domain-crossing bridge built on async gray-pointer FIFOs.
+///
+/// Drop-in port-compatible with [HarborWishboneCdcBridge] (the small gray-counter
+/// handshake), but crosses the two domains through a request FIFO (slave->master)
+/// and a response FIFO (master->slave) instead of a single-outstanding req/done
+/// handshake. Each FIFO decouples the domains: the producer advances its write
+/// pointer freely and the consumer drains as its synchronized view of that
+/// pointer catches up, so the crossing tolerates the pathological fixed phase of
+/// two phase-locked clocks (the creek sys/ctrl case where the tight handshake
+/// wedged) far better: the payload is captured into FIFO storage and only read
+/// out after the gray write-pointer has safely crossed, rather than sampled as a
+/// quasi-static multi-cycle path.
+///
+/// [target] + [blockRam] select FIFO storage: block RAM on an FPGA target that
+/// supports it (keeps the depth off the flop budget), else flops. [depth] is the
+/// per-direction FIFO depth (power of two). Deeper buffers more in flight and
+/// gives the pointer synchronizers a moving target to latch.
+class HarborWishboneCdcFifoBridge extends BridgeModule {
+  /// Address bus width.
+  final int addressWidth;
+
+  /// Data bus width.
+  final int dataWidth;
+
+  /// Byte-select width.
+  final int selWidth;
+
+  /// Per-direction FIFO depth (power of two, >= 2).
+  final int depth;
+
+  /// FPGA target (selects block-RAM vs flop FIFO storage when [blockRam]).
+  final HarborDeviceTarget? target;
+
+  /// Back the FIFO storage with block RAM where [target] supports it.
+  final bool blockRam;
+
+  HarborWishboneCdcFifoBridge({
+    required this.addressWidth,
+    required this.dataWidth,
+    int? selWidth,
+    this.depth = 8,
+    this.target,
+    this.blockRam = false,
+    super.name = 'wishbone_cdc_fifo',
+  }) : selWidth = selWidth ?? (dataWidth ~/ 8),
+       assert(
+         depth >= 2 && (depth & (depth - 1)) == 0,
+         'depth must be a power of two and >= 2',
+       ),
+       super('HarborWishboneCdcFifoBridge') {
+    final sw = this.selWidth;
+    final aw = addressWidth;
+    final dw = dataWidth;
+
+    createPort('s_clk', PortDirection.input);
+    createPort('s_reset', PortDirection.input);
+    createPort('s_cyc', PortDirection.input);
+    createPort('s_stb', PortDirection.input);
+    createPort('s_we', PortDirection.input);
+    createPort('s_adr', PortDirection.input, width: aw);
+    createPort('s_dat_w', PortDirection.input, width: dw);
+    createPort('s_sel', PortDirection.input, width: sw);
+    addOutput('s_ack');
+    addOutput('s_dat_r', width: dw);
+
+    createPort('m_clk', PortDirection.input);
+    createPort('m_reset', PortDirection.input);
+    createPort('m_ack', PortDirection.input);
+    createPort('m_dat_r', PortDirection.input, width: dw);
+    addOutput('m_cyc');
+    addOutput('m_stb');
+    addOutput('m_we');
+    addOutput('m_adr', width: aw);
+    addOutput('m_dat_w', width: dw);
+    addOutput('m_sel', width: sw);
+
+    final sClk = input('s_clk');
+    final sReset = input('s_reset');
+    final mClk = input('m_clk');
+    final mReset = input('m_reset');
+
+    // Request payload packed { we, adr, dat_w, sel } (MSB..LSB).
+    final reqW = 1 + aw + dw + sw;
+
+    final reqFifo = HarborCdcFifo(
+      dataWidth: reqW,
+      depth: depth,
+      target: target,
+      blockRam: blockRam,
+      name: 'req_fifo',
+    );
+    final respFifo = HarborCdcFifo(
+      dataWidth: dw,
+      depth: depth,
+      target: target,
+      blockRam: blockRam,
+      name: 'resp_fifo',
+    );
+    addSubModule(reqFifo);
+    addSubModule(respFifo);
+
+    final pending = Logic(name: 'pending');
+    final ackReg = Logic(name: 's_ack_reg');
+    final sDatRReg = Logic(name: 's_dat_r_reg', width: dw);
+
+    final reqFull = reqFifo.output('wr_full');
+    final reqPush =
+        (input('s_cyc') & input('s_stb') & ~pending & ~ackReg & ~reqFull).named(
+          'req_push',
+        );
+    reqFifo.input('wr_clk').srcConnection! <= sClk;
+    reqFifo.input('wr_reset').srcConnection! <= sReset;
+    reqFifo.input('wr_en').srcConnection! <= reqPush;
+    reqFifo.input('wr_data').srcConnection! <=
+        [
+          input('s_we'),
+          input('s_adr'),
+          input('s_dat_w'),
+          input('s_sel'),
+        ].swizzle();
+
+    final respEmpty = respFifo.output('rd_empty');
+    final respPop = (pending & ~respEmpty).named('resp_pop');
+    respFifo.input('rd_clk').srcConnection! <= sClk;
+    respFifo.input('rd_reset').srcConnection! <= sReset;
+    respFifo.input('rd_en').srcConnection! <= respPop;
+
+    Sequential(sClk, [
+      If(
+        sReset,
+        then: [
+          pending < Const(0),
+          ackReg < Const(0),
+          sDatRReg < Const(0, width: dw),
+        ],
+        orElse: [
+          ackReg < Const(0),
+          If(reqPush, then: [pending < Const(1)]),
+          If(
+            respPop,
+            then: [
+              sDatRReg < respFifo.output('rd_data'),
+              ackReg < Const(1),
+              pending < Const(0),
+            ],
+          ),
+        ],
+      ),
+    ]);
+
+    output('s_ack') <= ackReg;
+    output('s_dat_r') <= sDatRReg;
+
+    final serving = Logic(name: 'serving');
+    final mCycReg = Logic(name: 'm_cyc_reg');
+
+    final reqEmpty = reqFifo.output('rd_empty');
+    final respWrFull = respFifo.output('wr_full');
+    final startServe = (~reqEmpty & ~serving & ~respWrFull).named(
+      'start_serve',
+    );
+    final complete = (serving & mCycReg & input('m_ack')).named('complete');
+
+    reqFifo.input('rd_clk').srcConnection! <= mClk;
+    reqFifo.input('rd_reset').srcConnection! <= mReset;
+    // Keep the head in the FIFO while serving (drives m_adr etc. directly).
+    // Pop it only on completion.
+    reqFifo.input('rd_en').srcConnection! <= complete;
+
+    respFifo.input('wr_clk').srcConnection! <= mClk;
+    respFifo.input('wr_reset').srcConnection! <= mReset;
+    respFifo.input('wr_en').srcConnection! <= complete;
+    respFifo.input('wr_data').srcConnection! <= input('m_dat_r');
+
+    Sequential(mClk, [
+      If(
+        mReset,
+        then: [serving < Const(0), mCycReg < Const(0)],
+        orElse: [
+          If(
+            startServe,
+            then: [serving < Const(1), mCycReg < Const(1)],
+            orElse: [
+              If(complete, then: [serving < Const(0), mCycReg < Const(0)]),
+            ],
+          ),
+        ],
+      ),
+    ]);
+
+    // Unpack the FIFO head { we, adr, dat_w, sel } onto the master bus. Stable
+    // while serving because the head is not popped until completion.
+    final head = reqFifo.output('rd_data');
+    output('m_cyc') <= mCycReg;
+    output('m_stb') <= mCycReg;
+    output('m_we') <= head.slice(reqW - 1, reqW - 1);
+    output('m_adr') <= head.slice(reqW - 2, reqW - 1 - aw);
+    output('m_dat_w') <= head.slice(sw + dw - 1, sw);
+    output('m_sel') <= head.slice(sw - 1, 0);
+
+    // Observation tap, port-compatible with HarborWishboneCdcBridge.dbg so the
+    // DDR controller's dbg_cdc routing is unchanged. swizzle: first = MSB (bit 7).
+    //   [0] pending (slave txn outstanding)   [1] s_ack
+    //   [2] serving (master cycle live)       [3] m_cyc
+    //   [4] req_fifo not empty (fast sees a request queued)
+    //   [5] resp_fifo not empty (slave has a response waiting)
+    //   [6] req_fifo full (back-pressure to the slave)
+    //   [7] resp_fifo full (back-pressure to the master)
+    addOutput('dbg', width: 8) <=
+        [
+          respFifo.output('wr_full'),
+          reqFull,
+          ~respEmpty,
+          ~reqEmpty,
+          mCycReg,
+          serving,
+          ackReg,
+          pending,
+        ].swizzle();
+  }
+}

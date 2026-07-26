@@ -24,17 +24,16 @@ class WishboneMasterTestDriver extends BridgeModule {
     createPort('m_we', PortDirection.input);
     createPort('m_adr', PortDirection.input, width: config.addressWidth);
     createPort('m_dat_out', PortDirection.input, width: config.dataWidth);
+    // Byte-lane selects, driven by the testbench (defaults to all-ones for
+    // whole-word access, a sub-word test drives a partial mask).
+    createPort('m_sel', PortDirection.input, width: config.effectiveSelWidth);
 
     bus.cyc <= input('m_cyc');
     bus.stb <= input('m_stb');
     bus.we <= input('m_we');
     bus.adr <= input('m_adr');
     bus.datMosi <= input('m_dat_out');
-    bus.sel <=
-        Const(
-          (1 << config.effectiveSelWidth) - 1,
-          width: config.effectiveSelWidth,
-        );
+    bus.sel <= input('m_sel');
 
     addOutput('m_dat_in', width: config.dataWidth);
     addOutput('m_ack');
@@ -68,6 +67,8 @@ class PeripheralTestBench extends BridgeModule {
   final BridgeModule peripheral;
   late final WishboneMasterTestDriver master;
   late final Logic clk;
+  late final int _selWidth;
+  int get _fullSel => (1 << _selWidth) - 1;
 
   Logic get ack => master.output('m_ack');
   Logic get datIn => master.output('m_dat_in');
@@ -82,6 +83,7 @@ class PeripheralTestBench extends BridgeModule {
 
     final wb =
         peripheral.interface('bus').internalInterface! as WishboneInterface;
+    _selWidth = wb.config.effectiveSelWidth;
 
     master = WishboneMasterTestDriver(config: wb.config);
     addSubModule(master);
@@ -97,6 +99,7 @@ class PeripheralTestBench extends BridgeModule {
     pullUpPort(master.port('m_we'), newPortName: 'we');
     pullUpPort(master.port('m_adr'), newPortName: 'adr');
     pullUpPort(master.port('m_dat_out'), newPortName: 'dat_out');
+    pullUpPort(master.port('m_sel'), newPortName: 'sel');
   }
 
   /// Builds the module hierarchy, asserts reset for 3 cycles,
@@ -115,6 +118,7 @@ class PeripheralTestBench extends BridgeModule {
     input('we').inject(0);
     input('adr').inject(0);
     input('dat_out').inject(0);
+    input('sel').inject(_fullSel);
 
     Simulator.setMaxSimTime(maxSimTime);
     unawaited(Simulator.run());
@@ -126,13 +130,16 @@ class PeripheralTestBench extends BridgeModule {
     await clk.nextPosedge;
   }
 
-  /// Performs a bus write transaction and waits for ACK.
-  Future<void> write(int address, int data) async {
+  /// Performs a bus write transaction and waits for ACK. [sel] drives the
+  /// byte-lane selects (defaults to all-ones for a whole-word write), pass a
+  /// partial mask to exercise sub-word stores.
+  Future<void> write(int address, int data, {int? sel}) async {
     input('cyc').put(1);
     input('stb').put(1);
     input('we').put(1);
     input('adr').put(address);
     input('dat_out').put(data);
+    input('sel').put(sel ?? _fullSel);
 
     for (var i = 0; i < 10; i++) {
       await clk.nextPosedge;
@@ -142,6 +149,7 @@ class PeripheralTestBench extends BridgeModule {
     input('cyc').put(0);
     input('stb').put(0);
     input('we').put(0);
+    input('sel').put(_fullSel);
     await clk.nextPosedge;
   }
 

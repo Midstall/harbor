@@ -8,7 +8,7 @@ const _int = RiscVIntRegFile(32);
 const _fp32 = RiscVFloatRegFile(32);
 const _fp16 = RiscVFloatRegFile(16);
 
-/// Zfhmin - Minimal half-precision floating-point support.
+/// Zfhmin: Minimal half-precision floating-point support.
 final rvZfhmin = RiscVExtension(
   name: 'Zfhmin',
   key: null,

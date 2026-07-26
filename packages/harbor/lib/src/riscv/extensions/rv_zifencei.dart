@@ -3,7 +3,7 @@ import '../extension.dart';
 import '../micro_op.dart';
 import '../operation.dart';
 
-/// Zifencei - Instruction-fetch fence.
+/// Zifencei: Instruction-fetch fence.
 const rvZifencei = RiscVExtension(
   name: 'Zifencei',
   key: null,

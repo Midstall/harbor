@@ -42,7 +42,7 @@ RiscVOperation _atomic(
   ],
 );
 
-/// RV32A + RV64A - Atomic extension.
+/// RV32A + RV64A: Atomic extension.
 final rvA = RiscVExtension(
   name: 'A',
   key: 'A',
@@ -219,8 +219,8 @@ final rvA = RiscVExtension(
   ],
 );
 
-/// Zacas - atomic compare-and-swap. amocas.w/.d compare mem[rs1] against rd and,
-/// if equal, store rs2; rd always receives the loaded value. funct5=00101 ->
+/// Zacas: atomic compare-and-swap. amocas.w/.d compare mem[rs1] against rd and,
+/// if equal, store rs2. rd always receives the loaded value. funct5=00101 ->
 /// funct7=0x14 (aq=rl=0). amocas.q (RV128) is omitted. Uses the standard AMO
 /// microcode (the cas execution reads rd's value as the compare operand).
 final rvZacas = RiscVExtension(

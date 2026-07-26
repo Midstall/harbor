@@ -36,7 +36,7 @@ RiscVOperation _mulDiv(
   ],
 );
 
-/// RV32M + RV64M - Multiply/Divide extension.
+/// RV32M + RV64M: Multiply/Divide extension.
 final rvM = RiscVExtension(
   name: 'M',
   key: 'M',

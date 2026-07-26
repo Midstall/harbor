@@ -1,4 +1,5 @@
 import 'package:rohd/rohd.dart';
+import 'package:rohd_bridge/rohd_bridge.dart';
 import 'package:rohd_hcl/rohd_hcl.dart' show PriorityArbiter, RoundRobinArbiter;
 
 import '../bus.dart';
@@ -6,111 +7,89 @@ import 'wishbone_interface.dart';
 
 /// Arbitrates N Wishbone masters onto a single Wishbone slave.
 ///
-/// Supports [BusArbitration.roundRobin] and [BusArbitration.fixed]
-/// strategies. The selected master's signals are forwarded to the
-/// slave, and the slave's responses are routed back.
-class WishboneArbiter extends Module {
-  /// The slave-side interface (output of the arbiter).
-  late final WishboneInterface slave;
+/// A [BridgeModule] so it composes via `connectInterfaces`: it exposes a
+/// consumer-role `master_$i` interface per master (it receives their requests
+/// and drives their responses) and a provider-role `slave` interface (it drives
+/// the merged transaction toward the downstream decoder/slave). Round-robin or
+/// fixed/priority selection, with GRANT LOCKING: once a master is granted it
+/// holds the grant while it keeps CYC asserted, so a transaction is never
+/// interrupted by re-arbitration (the bare round-robin re-picks every cycle,
+/// which livelocks two simultaneously-requesting masters).
+class WishboneArbiter extends BridgeModule {
+  final int numMasters;
 
-  /// Which master is currently granted (one-hot).
+  /// Which master is currently granted (one-hot, effective/locked grant).
   Logic get grant => output('grant');
 
-  WishboneArbiter(
-    List<WishboneInterface> masters,
-    WishboneInterface slaveInterface, {
-    required Logic clk,
-    required Logic reset,
+  WishboneArbiter({
+    required this.numMasters,
+    required WishboneConfig config,
     BusArbitration arbitration = BusArbitration.roundRobin,
-    super.name = 'wishbone_arbiter',
-  }) : super(definitionName: 'WishboneArbiter_M${masters.length}') {
-    if (masters.isEmpty) {
-      throw ArgumentError('At least one master is required.');
+    String? name,
+  }) : super('WishboneArbiter_M$numMasters', name: name ?? 'wishbone_arbiter') {
+    if (numMasters < 1) {
+      throw ArgumentError('At least one master is required, got $numMasters');
     }
 
-    final config = slaveInterface.config;
-    slave = slaveInterface;
+    createPort('clk', PortDirection.input);
+    createPort('reset', PortDirection.input);
+    final clk = input('clk');
+    final reset = input('reset');
 
-    final clkIn = addInput('clk', clk);
-    final resetIn = addInput('reset', reset);
+    // Per-master consumer interfaces (we read requests, drive responses).
+    final masters = <WishboneInterface>[
+      for (var i = 0; i < numMasters; i++)
+        addInterface(
+              WishboneInterface(config),
+              name: 'master_$i',
+              role: PairRole.consumer,
+            ).internalInterface
+            as WishboneInterface,
+    ];
 
-    // Add master inputs
-    final masterInputs =
-        <
-          ({
-            Logic cyc,
-            Logic stb,
-            Logic we,
-            Logic adr,
-            Logic datMosi,
-            Logic sel,
-          })
-        >[];
+    // Provider interface toward the downstream slave (we drive the request).
+    final slave =
+        addInterface(
+              WishboneInterface(config),
+              name: 'slave',
+              role: PairRole.provider,
+            ).internalInterface
+            as WishboneInterface;
 
-    for (var i = 0; i < masters.length; i++) {
-      masterInputs.add((
-        cyc: addInput('m${i}_cyc', masters[i].cyc),
-        stb: addInput('m${i}_stb', masters[i].stb),
-        we: addInput('m${i}_we', masters[i].we),
-        adr: addInput('m${i}_adr', masters[i].adr, width: config.addressWidth),
-        datMosi: addInput(
-          'm${i}_dat_mosi',
-          masters[i].datMosi,
-          width: config.dataWidth,
-        ),
-        sel: addInput(
-          'm${i}_sel',
-          masters[i].sel,
-          width: config.effectiveSelWidth,
-        ),
-      ));
-    }
+    // Request = each master's CYC.
+    final requests = [for (final m in masters) m.cyc];
 
-    // Add slave outputs
-    final sCyc = addOutput('s_cyc');
-    final sStb = addOutput('s_stb');
-    final sWe = addOutput('s_we');
-    final sAdr = addOutput('s_adr', width: config.addressWidth);
-    final sDatMosi = addOutput('s_dat_mosi', width: config.dataWidth);
-    final sSel = addOutput('s_sel', width: config.effectiveSelWidth);
-
-    // Slave → master response inputs
-    final sAck = addInput('s_ack', slaveInterface.ack);
-    final sDatMiso = addInput(
-      's_dat_miso',
-      slaveInterface.datMiso,
-      width: config.dataWidth,
-    );
-
-    // Connect slave outputs
-    slaveInterface.cyc <= sCyc;
-    slaveInterface.stb <= sStb;
-    slaveInterface.we <= sWe;
-    slaveInterface.adr <= sAdr;
-    slaveInterface.datMosi <= sDatMosi;
-    slaveInterface.sel <= sSel;
-
-    // Arbitration: build request signals from CYC
-    final requests = masterInputs.map((m) => m.cyc).toList();
-
-    // Generate grant signals
     final grantSignals = <Logic>[];
     switch (arbitration) {
       case BusArbitration.roundRobin:
-        final arbiter = RoundRobinArbiter(requests, clk: clkIn, reset: resetIn);
-        grantSignals.addAll(arbiter.grants);
+        final arb = RoundRobinArbiter(requests, clk: clk, reset: reset);
+        grantSignals.addAll(arb.grants);
       case BusArbitration.fixed:
       case BusArbitration.priority:
-        final arbiter = PriorityArbiter(requests);
-        grantSignals.addAll(arbiter.grants);
+        final arb = PriorityArbiter(requests);
+        grantSignals.addAll(arb.grants);
     }
 
-    addOutput('grant', width: masters.length);
-    for (var i = 0; i < masters.length; i++) {
-      grant[i] <= grantSignals[i];
-    }
+    // Grant locking: hold the grant to a master while it keeps CYC asserted.
+    final requestsVec = requests.rswizzle();
+    final grantVec = grantSignals.rswizzle();
+    final heldReg = Logic(name: 'held_grant', width: numMasters);
+    final heldReqVec = (heldReg & requestsVec).named('held_req');
+    final heldValid = heldReqVec.or().named('held_valid');
+    final effVec = mux(heldValid, heldReqVec, grantVec).named('eff_grant');
+    Sequential(clk, [
+      If(
+        reset,
+        then: [heldReg < Const(0, width: numMasters)],
+        orElse: [heldReg < effVec],
+      ),
+    ]);
+    final effGrant = [for (var i = 0; i < numMasters; i++) effVec[i]];
 
-    // Mux master signals to slave based on grant
+    addOutput('grant', width: numMasters);
+    grant <= effVec;
+
+    // Mux the granted master's request onto the slave.
     final muxedCyc = Logic(name: 'muxed_cyc');
     final muxedStb = Logic(name: 'muxed_stb');
     final muxedWe = Logic(name: 'muxed_we');
@@ -125,32 +104,32 @@ class WishboneArbiter extends Module {
       muxedAdr < Const(0, width: config.addressWidth),
       muxedDatMosi < Const(0, width: config.dataWidth),
       muxedSel < Const(0, width: config.effectiveSelWidth),
-      for (var i = masters.length - 1; i >= 0; i--)
+      for (var i = numMasters - 1; i >= 0; i--)
         If(
-          grantSignals[i],
+          effGrant[i],
           then: [
-            muxedCyc < masterInputs[i].cyc,
-            muxedStb < masterInputs[i].stb,
-            muxedWe < masterInputs[i].we,
-            muxedAdr < masterInputs[i].adr,
-            muxedDatMosi < masterInputs[i].datMosi,
-            muxedSel < masterInputs[i].sel,
+            muxedCyc < masters[i].cyc,
+            muxedStb < masters[i].stb,
+            muxedWe < masters[i].we,
+            muxedAdr < masters[i].adr,
+            muxedDatMosi < masters[i].datMosi,
+            muxedSel < masters[i].sel,
           ],
         ),
     ]);
 
-    sCyc <= muxedCyc;
-    sStb <= muxedStb;
-    sWe <= muxedWe;
-    sAdr <= muxedAdr;
-    sDatMosi <= muxedDatMosi;
-    sSel <= muxedSel;
+    slave.cyc <= muxedCyc;
+    slave.stb <= muxedStb;
+    slave.we <= muxedWe;
+    slave.adr <= muxedAdr;
+    slave.datMosi <= muxedDatMosi;
+    slave.sel <= muxedSel;
 
-    // Route slave responses back to all masters
-    // ACK is gated per-master, DAT_MISO is broadcast
-    for (var i = 0; i < masters.length; i++) {
-      masters[i].ack <= sAck & grantSignals[i];
-      masters[i].datMiso <= sDatMiso;
+    // Route the slave response back to each master (ACK gated by grant,
+    // DAT_MISO broadcast: only the granted master consumes it).
+    for (var i = 0; i < numMasters; i++) {
+      masters[i].ack <= slave.ack & effGrant[i];
+      masters[i].datMiso <= slave.datMiso;
     }
   }
 }

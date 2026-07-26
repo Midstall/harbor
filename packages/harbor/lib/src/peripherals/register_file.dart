@@ -1,7 +1,9 @@
 import 'package:rohd/rohd.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 
+import '../blackbox/ecp5/ecp5.dart';
 import '../blackbox/ice40/ice40.dart';
+import '../blackbox/xilinx/xilinx.dart';
 import '../soc/target.dart';
 
 /// A configurable multi-read / multi-write register file.
@@ -22,18 +24,23 @@ import '../soc/target.dart';
 /// write and retry next cycle. A write-after-write to the *same* register in
 /// the same cycle is special-cased: the youngest writer's value wins and both
 /// ports report ready. (A configurable per-bank write buffer to absorb
-/// conflicts without stalling is planned via [writeBufferDepth]; depth 0, the
+/// conflicts without stalling is planned via [writeBufferDepth]. Depth 0, the
 /// default, is the pure stall-on-conflict arbiter.)
 ///
 /// Because the banking/arbitration logic is the same RTL across backends, a
 /// simulation faithfully models the FPGA/ASIC conflict stalls.
 ///
-/// Reads of entry 0 always return zero (RISC-V x0); writes to entry 0 are
-/// dropped (the caller need not suppress them, though it typically does).
+/// By default ([reservedZero] == true) the file follows RISC-V x0 semantics:
+/// reads of entry 0 always return zero and writes to entry 0 are dropped (the
+/// caller need not suppress them, though it typically does). Set
+/// [reservedZero] to false to make entry 0 a normal storage entry, reads return
+/// its stored value and writes to it take effect like any other entry. This
+/// lets the file be used as a generic byte buffer where entry 0 must hold real
+/// data.
 ///
 /// Port names preserve backwards compatibility: with a single write port the
 /// ports are `wr_en`/`wr_addr`/`wr_data` (plus a `wr_ready` that is always
-/// asserted); with multiple write ports they are `wr{w}_en`/`wr{w}_addr`/
+/// asserted). With multiple write ports they are `wr{w}_en`/`wr{w}_addr`/
 /// `wr{w}_data`/`wr{w}_ready`. Read ports are always `rd{r}_addr`/`rd{r}_data`.
 class HarborRegisterFile extends BridgeModule {
   final int numEntries;
@@ -43,6 +50,20 @@ class HarborRegisterFile extends BridgeModule {
   final int numWritePorts;
   final int numBanks;
   final int writeBufferDepth;
+
+  /// When true (the default), entry 0 follows RISC-V x0 semantics: reads of
+  /// entry 0 always return zero and writes to entry 0 are dropped. When false,
+  /// entry 0 is a normal storage entry that round-trips written values like any
+  /// other entry.
+  final bool reservedZero;
+
+  /// Read latency in cycles: 0 = combinational/mid-cycle read (flop array,
+  /// iCE40 negedge EBR), 1 = registered full-cycle read (ECP5 posedge EBR). A
+  /// non-zero latency keeps the read off the combinational ALU path (timing)
+  /// at the cost of one extra cycle. The consumer must align its read handshake
+  /// (done/valid) to it. The flop model honours this latency too, so the +1
+  /// read pipeline is simulatable without the EBR blackbox.
+  final int readLatency;
 
   /// Number of address bits that select the bank (low bits of the register
   /// index). Zero when there is a single bank.
@@ -62,12 +83,36 @@ class HarborRegisterFile extends BridgeModule {
       numWritePorts == 1 ? 'wr_$suffix' : 'wr${w}_$suffix';
 
   /// Flop storage, present only in the simulation/non-BRAM model. A flat array
-  /// of [numEntries]; banking constrains only the write arbiter, not the
+  /// of [numEntries]. Banking constrains only the write arbiter, not the
   /// physical layout (flops are naturally multi-read/multi-write).
   List<Logic>? _storage;
 
   /// Testbench hook to read an entry's value (simulation model only).
   LogicValue? getData(LogicValue addr) => _storage?[addr.toInt()].value;
+
+  /// Read latency implied by the backend the given config selects.
+  ///
+  /// iCE40 uses a negedge-read EBR that completes mid-cycle (latency 0). ECP5
+  /// DP16KD and the Xilinx RAMB36E1 path are posedge-registered (latency 1).
+  /// The Xilinx BRAM path is only used for the single-write, single-bank shape.
+  /// Any other Xilinx config falls to the flop backend, which stays at latency
+  /// 0 (the buffered multi-write path requires it).
+  static int _defaultReadLatency(
+    HarborDeviceTarget? target,
+    int numWritePorts,
+    int numBanks,
+  ) {
+    if (target is! HarborFpgaTarget) return 0;
+    switch (target.vendor) {
+      case HarborFpgaVendor.ice40:
+        return 0;
+      case HarborFpgaVendor.ecp5:
+        return 1;
+      case HarborFpgaVendor.vivado:
+      case HarborFpgaVendor.openXc7:
+        return (numWritePorts == 1 && numBanks == 1) ? 1 : 0;
+    }
+  }
 
   HarborRegisterFile({
     this.numEntries = 32,
@@ -76,9 +121,14 @@ class HarborRegisterFile extends BridgeModule {
     this.numWritePorts = 1,
     this.numBanks = 1,
     this.writeBufferDepth = 0,
+    this.reservedZero = true,
     HarborDeviceTarget? target,
+    int? forceReadLatency,
     String? name,
   }) : addrWidth = numEntries > 1 ? (numEntries - 1).bitLength : 1,
+       readLatency =
+           forceReadLatency ??
+           _defaultReadLatency(target, numWritePorts, numBanks),
        super(
          'HarborRegisterFile_E${numEntries}_W${dataWidth}_'
          'R${numReadPorts}_W${numWritePorts}_B$numBanks',
@@ -134,18 +184,37 @@ class HarborRegisterFile extends BridgeModule {
     ];
     final wrReadys = [for (var w = 0; w < numWritePorts; w++) writeReady(w)];
 
-    final isEbr =
+    final isIce40Ebr =
         target is HarborFpgaTarget && target.vendor == HarborFpgaVendor.ice40;
+    final isEcp5Ebr =
+        target is HarborFpgaTarget && target.vendor == HarborFpgaVendor.ecp5;
+    // Xilinx uses its block RAM only for the single-write, single-bank shape.
+    // A multi-write / banked Xilinx config falls through to the flop backend,
+    // matching the prior behaviour (a Xilinx RAMB multi-write backend is the
+    // same Phase 2 follow-up as the Lattice ones).
+    final isXilinxBram =
+        target is HarborFpgaTarget &&
+        (target.vendor == HarborFpgaVendor.vivado ||
+            target.vendor == HarborFpgaVendor.openXc7) &&
+        numWritePorts == 1 &&
+        numBanks == 1;
 
-    if (isEbr) {
+    if (isIce40Ebr || isEcp5Ebr) {
       if (numWritePorts != 1 || numBanks != 1) {
         // Banked multi-write EBR is project_hdl_dualissue Phase 2.
         throw UnimplementedError(
-          'iCE40 EBR backend currently supports a single write port and a '
-          'single bank (got numWritePorts=$numWritePorts, numBanks=$numBanks).',
+          'EBR backend currently supports a single write port and a single '
+          'bank (got numWritePorts=$numWritePorts, numBanks=$numBanks).',
         );
       }
-      _buildIce40Ebr(clk, rdAddrs, rdDatas, wrEns[0], wrAddrs[0], wrDatas[0]);
+      if (isIce40Ebr) {
+        _buildIce40Ebr(clk, rdAddrs, rdDatas, wrEns[0], wrAddrs[0], wrDatas[0]);
+      } else {
+        _buildEcp5Ebr(clk, rdAddrs, rdDatas, wrEns[0], wrAddrs[0], wrDatas[0]);
+      }
+      wrReadys[0] <= Const(1);
+    } else if (isXilinxBram) {
+      _buildXilinxBram(clk, rdAddrs, rdDatas, wrEns[0], wrAddrs[0], wrDatas[0]);
       wrReadys[0] <= Const(1);
     } else if (writeBufferDepth > 0 && numWritePorts > 1) {
       // A single write port never collides, so the buffer is only built for
@@ -155,6 +224,15 @@ class HarborRegisterFile extends BridgeModule {
         throw UnimplementedError(
           'write buffer is implemented for numWritePorts==2 '
           '(got $numWritePorts).',
+        );
+      }
+      if (readLatency != 0) {
+        // Registered-read latency is wired for the single-write simple flop and
+        // the ECP5 EBR (the in-order EBR target). The buffered multi-write path
+        // (OoO dual-commit) does not pipeline its bypassed read yet.
+        throw UnimplementedError(
+          'readLatency > 0 is not supported with the write-buffered backend '
+          '(got readLatency=$readLatency).',
         );
       }
       _buildBankedFlopBuffered(
@@ -184,6 +262,19 @@ class HarborRegisterFile extends BridgeModule {
   /// Bank index (low [_bankBits] of the register address).
   Logic _bankOf(Logic addr) =>
       _bankBits == 0 ? Const(0, width: 1) : addr.slice(_bankBits - 1, 0);
+
+  /// Pipelines [d] through [n] flip-flops on [clk]. Read data is transient and
+  /// the consumer gates on a read handshake aligned to the same latency, so no
+  /// reset is needed. Returns [d] unchanged when [n] == 0.
+  Logic _registerN(Logic clk, Logic d, int n, String name) {
+    var s = d;
+    for (var i = 0; i < n; i++) {
+      final q = Logic(name: '${name}_q$i', width: d.width);
+      Sequential(clk, [q < s]);
+      s = q;
+    }
+    return s;
+  }
 
   /// iCE40 EBR-backed storage. One SB_RAM40_4K copy per read port (the EBR is
   /// single-read-port), `ceil(dataWidth/16)` wide. Read clock is inverted so
@@ -242,13 +333,198 @@ class HarborRegisterFile extends BridgeModule {
           ? slices.first.zeroExtend(dataWidth)
           : slices.rswizzle().getRange(0, dataWidth);
 
-      // x0 reads as zero.
+      // x0 reads as zero (only when entry 0 is reserved).
       rdDatas[r] <=
-          mux(
-            rdAddrs[r].eq(Const(0, width: addrWidth)),
-            Const(0, width: dataWidth),
-            raw,
-          );
+          (reservedZero
+              ? mux(
+                  rdAddrs[r].eq(Const(0, width: addrWidth)),
+                  Const(0, width: dataWidth),
+                  raw,
+                )
+              : raw);
+    }
+  }
+
+  /// ECP5 EBR-backed storage. The DP16KD is true dual-port, so one copy per read
+  /// port uses port A as the shared write port and port B as that port's read,
+  /// both on the **posedge** of clk. The DP16KD read is synchronous, so this is
+  /// a registered full-cycle read ([readLatency] == 1): the read result is one
+  /// cycle behind the address but stays off the combinational ALU path, which is
+  /// what makes timing close at 48 MHz (a negedge mid-cycle read instead steals
+  /// half the ALU's cycle). The consumer aligns its read handshake to the extra
+  /// cycle. `ceil(dataWidth/18)` blocks per read port in x18 mode, where the
+  /// word address occupies AD[13:4] (the low 4 bits are tied zero). Single write
+  /// port, single bank. Like [_buildIce40Ebr], the primitive is a blackbox with
+  /// no simulation model, so the EBR path is only selected for FPGA targets.
+  /// Simulation uses the flop array at the same [readLatency].
+  void _buildEcp5Ebr(
+    Logic clk,
+    List<Logic> rdAddrs,
+    List<Logic> rdDatas,
+    Logic wrEn,
+    Logic wrAddr,
+    Logic wrData,
+  ) {
+    const ebrWidth = 9;
+    const ebrAddrBits = 14;
+    final widthEbrs = (dataWidth + ebrWidth - 1) ~/ ebrWidth;
+    // x9 addressing: the word index sits in AD[13:3], low 3 bits tied zero.
+    // x18 RUNTIME WRITES read back ZERO on this OrangeCrab silicon (x18 INITVAL
+    // reads are fine, but a clocked x18 write never lands). x9 writes work. This
+    // is the same config the SRAM and microcode ROMs use, the only write mode
+    // the chip honors. Costs more blocks (ceil(64/9) == 8 per read port) but it
+    // is the proven-on-silicon path.
+    Logic toAd(Logic a) =>
+        [a.zeroExtend(ebrAddrBits - 3), Const(0, width: 3)].swizzle();
+    final wrAd = toAd(wrAddr);
+
+    for (var r = 0; r < rdAddrs.length; r++) {
+      final rdAd = toAd(rdAddrs[r]);
+      final slices = <Logic>[];
+
+      for (var w = 0; w < widthEbrs; w++) {
+        final lo = w * ebrWidth;
+        final hi = (lo + ebrWidth) > dataWidth ? dataWidth : lo + ebrWidth;
+        final sliceWidth = hi - lo;
+
+        // SINGLE-PORT x9: port A does BOTH the shared write and this read port's
+        // read (write wins via the address mux + weA). Port B is disabled.
+        // RATIONALE: an x18 DP16KD runtime write reads back ZERO on real ECP5
+        // silicon (confirmed on an OrangeCrab with a bare on-chip x18-write
+        // probe). Only x9 writes land. Single-port x9 port-A read+write is the
+        // config the SRAM and the microcode ROMs use and the one the chip
+        // honors. The microcode core reads operands and commits results in
+        // SEPARATE sequencer steps, so a single time-multiplexed port does not
+        // collide. The registered read keeps readLatency == 1 (the core delays
+        // its handshake to match).
+        final bram = Ecp5Dp16kd(
+          name: 'rf_ebr_r${r}_w$w',
+          dataWidthA: ebrWidth,
+          dataWidthB: ebrWidth,
+          clkA: clk,
+          ceA: Const(1),
+          weA: wrEn,
+          oceA: Const(0),
+          rstA: Const(0),
+          adA: mux(wrEn, wrAd, rdAd),
+          diA: wrData.getRange(lo, hi).zeroExtend(ebrWidth),
+          // Port B unused.
+          clkB: clk,
+          ceB: Const(0),
+          weB: Const(0),
+          oceB: Const(0),
+          rstB: Const(0),
+          adB: Const(0, width: ebrAddrBits),
+          diB: Const(0, width: ebrWidth),
+        );
+
+        slices.add(bram.doA.getRange(0, sliceWidth));
+      }
+
+      final raw = slices.length == 1
+          ? slices.first.zeroExtend(dataWidth)
+          : slices.rswizzle().getRange(0, dataWidth);
+
+      // x0 reads as zero (only when entry 0 is reserved). The BRAM read is
+      // registered (readLatency cycles), so the x0 test is delayed to match the
+      // address that was actually read.
+      if (reservedZero) {
+        final isX0 = _registerN(
+          clk,
+          rdAddrs[r].eq(Const(0, width: addrWidth)),
+          readLatency,
+          'rfEbrX0_$r',
+        );
+        rdDatas[r] <= mux(isX0, Const(0, width: dataWidth), raw);
+      } else {
+        rdDatas[r] <= raw;
+      }
+    }
+  }
+
+  /// Xilinx 7-series RAMB36E1-backed storage. Like [_buildEcp5Ebr], one true
+  /// dual-port block (or `ceil(dataWidth/32)` in x36 mode) per read port: port
+  /// A is the shared write port and port B is that port's read, both on the
+  /// posedge of clk. The RAMB read is synchronous, so this is a registered
+  /// full-cycle read ([readLatency] == 1), keeping the read off the
+  /// combinational ALU path. Writes are whole-word, so all four byte-write
+  /// enables follow wrEn. Single write port, single bank. The primitive is a
+  /// blackbox with no simulation model, so this path is only selected for
+  /// Xilinx targets. Simulation uses the flop array at the same [readLatency].
+  void _buildXilinxBram(
+    Logic clk,
+    List<Logic> rdAddrs,
+    List<Logic> rdDatas,
+    Logic wrEn,
+    Logic wrAddr,
+    Logic wrData,
+  ) {
+    const blockDataWidth = 32;
+    final widthBlocks = (dataWidth + blockDataWidth - 1) ~/ blockDataWidth;
+    // x36 addressing: the entry index sits in AD[14:5], a 1-bit pad above it
+    // and the low 5 bits tied zero.
+    Logic toAd(Logic a) => [
+      Const(0, width: 1),
+      a.zeroExtend(10),
+      Const(0, width: 5),
+    ].swizzle().getRange(0, 16);
+    final wrAd = toAd(wrAddr);
+
+    for (var r = 0; r < rdAddrs.length; r++) {
+      final rdAd = toAd(rdAddrs[r]);
+      final slices = <Logic>[];
+
+      for (var w = 0; w < widthBlocks; w++) {
+        final lo = w * blockDataWidth;
+        final hi = (lo + blockDataWidth) > dataWidth
+            ? dataWidth
+            : lo + blockDataWidth;
+        final sliceWidth = hi - lo;
+
+        final bram = XilinxRamb36e1(name: 'rf_bram_r${r}_w$w');
+        addSubModule(bram);
+
+        // Port A: shared write port (posedge), whole-word write.
+        bram.input('CLKARDCLK').srcConnection! <= clk;
+        bram.input('ENARDEN').srcConnection! <= Const(1);
+        bram.input('ADDRARDADDR').srcConnection! <= wrAd;
+        bram.input('DIADI').srcConnection! <=
+            wrData.getRange(lo, hi).zeroExtend(blockDataWidth);
+        bram.input('DIPADIP').srcConnection! <= Const(0, width: 4);
+        bram.input('WEA').srcConnection! <= [wrEn, wrEn, wrEn, wrEn].swizzle();
+        bram.input('REGCEAREGCE').srcConnection! <= Const(0);
+        bram.input('RSTRAMARSTRAM').srcConnection! <= Const(0);
+
+        // Port B: this read port (posedge -> registered full-cycle read).
+        bram.input('CLKBWRCLK').srcConnection! <= clk;
+        bram.input('ENBWREN').srcConnection! <= Const(1);
+        bram.input('WEBWE').srcConnection! <= Const(0, width: 8);
+        bram.input('ADDRBWRADDR').srcConnection! <= rdAd;
+        bram.input('DIBDI').srcConnection! <= Const(0, width: 32);
+        bram.input('DIPBDIP').srcConnection! <= Const(0, width: 4);
+        bram.input('REGCEB').srcConnection! <= Const(0);
+        bram.input('RSTRAMB').srcConnection! <= Const(0);
+
+        slices.add(bram.output('DOBDO').getRange(0, sliceWidth));
+      }
+
+      final raw = slices.length == 1
+          ? slices.first.zeroExtend(dataWidth)
+          : slices.rswizzle().getRange(0, dataWidth);
+
+      // x0 reads as zero (only when entry 0 is reserved), delayed to match the
+      // registered read latency.
+      if (reservedZero) {
+        final isX0 = _registerN(
+          clk,
+          rdAddrs[r].eq(Const(0, width: addrWidth)),
+          readLatency,
+          'rfBramX0_$r',
+        );
+        rdDatas[r] <= mux(isX0, Const(0, width: dataWidth), raw);
+      } else {
+        rdDatas[r] <= raw;
+      }
     }
   }
 
@@ -341,14 +617,16 @@ class HarborRegisterFile extends BridgeModule {
           (~wrEns[w] | wrAddrs[w].eq(servicedForPort)).named('wrReady_$w');
     }
 
-    // Storage update: each entry follows its bank's winning write. Entry 0
-    // (x0) is never stored.
+    // Storage update: each entry follows its bank's winning write. When
+    // [reservedZero], entry 0 (x0) is never stored, otherwise it is a normal
+    // entry.
+    final firstEntry = reservedZero ? 1 : 0;
     Sequential(clk, [
       If(
         reset,
         then: [for (final reg in storage) reg < zeroData],
         orElse: [
-          for (var entry = 1; entry < numEntries; entry++)
+          for (var entry = firstEntry; entry < numEntries; entry++)
             If(
               bankWinEn[entry % numBanks] &
                   bankWinAddr[entry % numBanks].eq(
@@ -360,21 +638,31 @@ class HarborRegisterFile extends BridgeModule {
       ),
     ]);
 
-    // Combinational reads (x0 reads zero). Banking does not constrain reads in
-    // the flop model.
+    // Combinational reads. When [reservedZero], entry 0 reads zero, otherwise it
+    // reads its stored value. Banking does not constrain reads in the flop
+    // model. The combinational result is then pipelined by [readLatency] so the
+    // flop model matches the registered EBR read latency (and the +1 read
+    // pipeline is simulatable here, off the EBR blackbox).
+    final rdComb = [
+      for (var r = 0; r < rdAddrs.length; r++)
+        Logic(name: 'rdComb_$r', width: dataWidth),
+    ];
     Combinational([
       for (var r = 0; r < rdAddrs.length; r++)
         Case(
           rdAddrs[r],
           [
-            for (var entry = 1; entry < numEntries; entry++)
+            for (var entry = firstEntry; entry < numEntries; entry++)
               CaseItem(Const(entry, width: addrWidth), [
-                rdDatas[r] < storage[entry],
+                rdComb[r] < storage[entry],
               ]),
           ],
-          defaultItem: [rdDatas[r] < zeroData],
+          defaultItem: [rdComb[r] < zeroData],
         ),
     ]);
+    for (var r = 0; r < rdAddrs.length; r++) {
+      rdDatas[r] <= _registerN(clk, rdComb[r], readLatency, 'rfRdLat_$r');
+    }
   }
 
   /// Flop array with per-bank write buffers (depth [writeBufferDepth]). A
@@ -469,7 +757,7 @@ class HarborRegisterFile extends BridgeModule {
       bankWrData.add(mux(pop, da[0], mux(en0, wrDatas[0], wrDatas[1])));
 
       // Entries to buffer this cycle. port0 (older) is buffered only if it
-      // can't write direct (i.e. we popped); port1 is buffered if popping or
+      // can't write direct (i.e. we popped). Port1 is buffered if popping or
       // if port0 also took the bank.
       final appended0 = (en0 & pop).named('appended0_b$b');
       final appended1 = (en1 & (pop | en0)).named('appended1_b$b');
@@ -545,14 +833,16 @@ class HarborRegisterFile extends BridgeModule {
     wrReadys[0] <= p0;
     wrReadys[1] <= p1;
 
-    // Storage update: each entry follows its bank's write command. Entry 0
-    // (x0) is never stored.
+    // Storage update: each entry follows its bank's write command. When
+    // [reservedZero], entry 0 (x0) is never stored, otherwise it is a normal
+    // entry.
+    final firstEntry = reservedZero ? 1 : 0;
     Sequential(clk, [
       If(
         reset,
         then: [for (final reg in storage) reg < zeroData],
         orElse: [
-          for (var entry = 1; entry < numEntries; entry++)
+          for (var entry = firstEntry; entry < numEntries; entry++)
             If(
               bankWrEn[entry % numBanks] &
                   bankWrAddr[entry % numBanks].eq(
@@ -565,7 +855,7 @@ class HarborRegisterFile extends BridgeModule {
     ]);
 
     // Combinational reads with buffer bypass. The youngest buffered entry
-    // matching the address (highest valid index, packed) wins over storage;
+    // matching the address (highest valid index, packed) wins over storage.
     // x0 reads zero.
     final storageRead = [
       for (var r = 0; r < rdAddrs.length; r++)
@@ -576,7 +866,7 @@ class HarborRegisterFile extends BridgeModule {
         Case(
           rdAddrs[r],
           [
-            for (var entry = 1; entry < numEntries; entry++)
+            for (var entry = firstEntry; entry < numEntries; entry++)
               CaseItem(Const(entry, width: addrWidth), [
                 storageRead[r] < storage[entry],
               ]),
@@ -594,12 +884,12 @@ class HarborRegisterFile extends BridgeModule {
           byVal = mux(sel, bufD[b][i], byVal); // higher i (younger) wins
         }
       }
+      final read = mux(byHit, byVal, storageRead[r]);
+      // When [reservedZero], entry 0 reads zero, otherwise it is a normal entry.
       rdDatas[r] <=
-          mux(
-            rdAddrs[r].eq(Const(0, width: addrWidth)),
-            zeroData,
-            mux(byHit, byVal, storageRead[r]),
-          );
+          (reservedZero
+              ? mux(rdAddrs[r].eq(Const(0, width: addrWidth)), zeroData, read)
+              : read);
     }
   }
 }

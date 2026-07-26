@@ -5,6 +5,7 @@ import '../bus/bus.dart';
 import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
+import '../soc/svd.dart';
 
 /// I2C master/slave controller.
 ///
@@ -18,7 +19,10 @@ import '../soc/device_tree.dart';
 ///
 /// Supports standard (100 kHz), fast (400 kHz), and fast-plus (1 MHz).
 class HarborI2cController extends BridgeModule
-    with HarborDeviceTreeNodeProvider, HarborAcpiDeviceProvider {
+    with
+        HarborDeviceTreeNodeProvider,
+        HarborAcpiDeviceProvider,
+        HarborSvdPeripheralProvider {
   /// Base address in the SoC memory map.
   final int baseAddress;
 
@@ -261,5 +265,14 @@ class HarborI2cController extends BridgeModule
       '#address-cells': 1,
       '#size-cells': 0,
     },
+  );
+
+  @override
+  HarborSvdPeripheral get svdPeripheral => HarborSvdPeripheral(
+    name: 'I2C',
+    groupName: 'I2C',
+    description: 'I2C master/slave controller',
+    baseAddress: baseAddress,
+    size: 0x1000,
   );
 }

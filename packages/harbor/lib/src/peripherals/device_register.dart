@@ -47,7 +47,7 @@ class HarborDeviceField {
       'HarborDeviceField($name, $width bytes @ 0x${offset.toRadixString(16)})';
 }
 
-/// A device register map - a collection of named fields at fixed offsets.
+/// A device register map: a collection of named fields at fixed offsets.
 ///
 /// Provides the declarative register description that peripherals
 /// use to implement MMIO read/write logic. River's `DeviceAccessor`

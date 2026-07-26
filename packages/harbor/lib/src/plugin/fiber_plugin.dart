@@ -30,27 +30,27 @@ class _PhaseAccessor {
 /// the dependency graph before elaboration.
 ///
 /// Each plugin instance is bound to exactly one [PluginHost] context.
-/// There is no global state - multiple hosts can coexist and elaborate
+/// There is no global state. Multiple hosts can coexist and elaborate
 /// in parallel.
 ///
 /// ```dart
 /// class MyAluPlugin extends FiberPlugin {
 ///   @override
-///   String get name => 'IntAlu';
+///   String get name => 'IntAlu'
 ///
 ///   @override
-///   Set<Type> get dependencies => {DecoderPlugin};
+///   Set<Type> get dependencies => {DecoderPlugin}
 ///
 ///   @override
 ///   void init() {
 ///     during.build(() async {
-///       final decoder = host.apply<DecoderPlugin>();
+///       final decoder = host.apply<DecoderPlugin>()
 ///       // ... build ALU hardware ...
-///     });
+///     })
 ///   }
 ///
 ///   @override
-///   Map<String, dynamic> toJson() => {'name': name};
+///   Map<String, dynamic> toJson() => {'name': name}
 /// }
 /// ```
 abstract class FiberPlugin {

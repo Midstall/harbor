@@ -1,6 +1,6 @@
 import 'package:rohd_bridge/rohd_bridge.dart';
 
-/// iCE40 SB_PLL40_CORE - Phase-locked loop (internal clock input).
+/// iCE40 SB_PLL40_CORE: Phase-locked loop (internal clock input).
 class Ice40SbPll40Core extends BridgeModule {
   Ice40SbPll40Core({
     required int divr,
@@ -25,7 +25,7 @@ class Ice40SbPll40Core extends BridgeModule {
   }
 }
 
-/// iCE40 SB_PLL40_PAD - Phase-locked loop (pad clock input).
+/// iCE40 SB_PLL40_PAD: Phase-locked loop (pad clock input).
 class Ice40SbPll40Pad extends BridgeModule {
   Ice40SbPll40Pad({
     required int divr,
@@ -50,7 +50,7 @@ class Ice40SbPll40Pad extends BridgeModule {
   }
 }
 
-/// iCE40 SB_GB - Global buffer.
+/// iCE40 SB_GB: Global buffer.
 class Ice40SbGb extends BridgeModule {
   Ice40SbGb({super.name = 'gb'}) : super('SB_GB', isSystemVerilogLeaf: true) {
     createPort('USER_SIGNAL_TO_GLOBAL_BUFFER', PortDirection.input);
@@ -58,7 +58,7 @@ class Ice40SbGb extends BridgeModule {
   }
 }
 
-/// iCE40 SB_IO - Configurable I/O cell.
+/// iCE40 SB_IO: Configurable I/O cell.
 class Ice40SbIo extends BridgeModule {
   Ice40SbIo({required String pinType, super.name = 'io'})
     : super('SB_IO', isSystemVerilogLeaf: true) {
@@ -76,7 +76,7 @@ class Ice40SbIo extends BridgeModule {
   }
 }
 
-/// iCE40 SB_RAM40_4K - 4Kbit single-port block RAM.
+/// iCE40 SB_RAM40_4K: 4Kbit single-port block RAM.
 class Ice40SbRam40_4k extends BridgeModule {
   Ice40SbRam40_4k({super.name = 'bram'})
     : super('SB_RAM40_4K', isSystemVerilogLeaf: true) {
@@ -94,7 +94,7 @@ class Ice40SbRam40_4k extends BridgeModule {
   }
 }
 
-/// iCE40 SB_RAM40_4KNR - 4Kbit BRAM with negative-edge read clock.
+/// iCE40 SB_RAM40_4KNR: 4Kbit BRAM with negative-edge read clock.
 ///
 /// Identical to [Ice40SbRam40_4k] but the read port samples on the falling
 /// edge of `RCLK`. Driving `RCLK` with the normal clock keeps the read in the
@@ -119,7 +119,7 @@ class Ice40SbRam40_4kNR extends BridgeModule {
   }
 }
 
-/// iCE40 SB_SPRAM256KA - 256Kbit single-port RAM.
+/// iCE40 SB_SPRAM256KA: 256Kbit single-port RAM.
 class Ice40SbSpram256ka extends BridgeModule {
   Ice40SbSpram256ka({super.name = 'spram'})
     : super('SB_SPRAM256KA', isSystemVerilogLeaf: true) {

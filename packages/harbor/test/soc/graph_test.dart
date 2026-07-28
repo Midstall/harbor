@@ -103,6 +103,35 @@ void main() {
       });
     });
 
+    group('jtag debug', () {
+      test('renders a JTAG master node wired to the bus (mermaid + dot)', () {
+        final graph = HarborSoCGraphGenerator(
+          name: 'Dbg SoC',
+          cpus: cpus,
+          peripherals: [uart],
+          hasJtagDebug: true,
+        );
+
+        final mermaid = graph.mermaid();
+        expect(mermaid, contains('jtag>"JTAG Debug'));
+        expect(mermaid, contains('jtag --> bus'));
+
+        final dot = graph.dot();
+        expect(dot, contains('jtag [label="JTAG Debug'));
+        expect(dot, contains('jtag -> bus;'));
+      });
+
+      test('omits the JTAG node when there is no debug subsystem', () {
+        final graph = HarborSoCGraphGenerator(
+          name: 'No Dbg',
+          cpus: cpus,
+          peripherals: [uart],
+        );
+        expect(graph.mermaid(), isNot(contains('jtag')));
+        expect(graph.dot(), isNot(contains('jtag')));
+      });
+    });
+
     group('empty', () {
       test('handles no CPUs or peripherals', () {
         final graph = HarborSoCGraphGenerator(name: 'Empty');

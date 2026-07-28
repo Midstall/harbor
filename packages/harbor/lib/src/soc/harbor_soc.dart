@@ -581,6 +581,7 @@ class HarborSoC extends BridgeModule {
         for (final p in providers)
           if (assign[p] != null) p: [assign[p]!],
       },
+      hasJtagDebug: masters.whereType<HarborJtagDebug>().isNotEmpty,
     );
   }
 
@@ -682,6 +683,18 @@ class HarborSoC extends BridgeModule {
             '$path/synth.tcl',
           ).writeAsStringSync(t.generateYosysTcl(name, svFiles: svFiles));
           File('$path/Makefile').writeAsStringSync(t.generateMakefile(name));
+
+          // OpenOCD config, auto-emitted when the SoC has a JTAG debug master.
+          final jtag = masters.whereType<HarborJtagDebug>();
+          if (jtag.isNotEmpty) {
+            final dm = jtag.first;
+            File('$path/openocd.cfg').writeAsStringSync(
+              t.generateOpenocdConfig(
+                innerIrWidth: dm.jtagInnerIrWidth,
+                dmIdcode: dm.jtagDmIdcode,
+              ),
+            );
+          }
         case HarborAsicTarget():
           File('$path/$name.sdc').writeAsStringSync(t.generateSdc());
           File('$path/synth.tcl').writeAsStringSync(t.generateYosysTcl());

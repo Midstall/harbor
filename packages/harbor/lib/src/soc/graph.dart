@@ -28,11 +28,17 @@ class HarborSoCGraphGenerator {
   /// by provider. Overrides a node's own interrupts when present.
   final Map<HarborDeviceTreeNodeProvider, List<int>> interrupts;
 
+  /// Whether the SoC has a JTAG debug subsystem (a second bus master that
+  /// reaches memory over System Bus Access). Rendered as a master node so the
+  /// diagram shows the design is debuggable over JTAG.
+  final bool hasJtagDebug;
+
   const HarborSoCGraphGenerator({
     required this.name,
     this.cpus = const [],
     this.peripherals = const [],
     this.interrupts = const {},
+    this.hasJtagDebug = false,
   });
 
   /// All device tree nodes from the peripherals.
@@ -62,10 +68,17 @@ class HarborSoCGraphGenerator {
       );
     }
 
+    if (hasJtagDebug) {
+      buf.writeln('    jtag>"JTAG Debug\\nSBA master"]');
+    }
+
     buf.writeln('    bus(("Bus Fabric"))');
 
     for (final cpu in cpus) {
       buf.writeln('    cpu${cpu.hartId} --> bus');
+    }
+    if (hasJtagDebug) {
+      buf.writeln('    jtag --> bus');
     }
 
     for (final n in nodes) {
@@ -123,6 +136,14 @@ class HarborSoCGraphGenerator {
     buf.writeln('    }');
     buf.writeln();
 
+    if (hasJtagDebug) {
+      buf.writeln(
+        '    jtag [label="JTAG Debug\\nSBA master"'
+        ', shape=component, style=filled, fillcolor=lightpink];',
+      );
+      buf.writeln();
+    }
+
     buf.writeln(
       '    bus [label="Bus Fabric"'
       ', shape=diamond, style=filled, fillcolor=lightyellow];',
@@ -131,6 +152,9 @@ class HarborSoCGraphGenerator {
 
     for (final cpu in cpus) {
       buf.writeln('    cpu${cpu.hartId} -> bus;');
+    }
+    if (hasJtagDebug) {
+      buf.writeln('    jtag -> bus;');
     }
     buf.writeln();
 

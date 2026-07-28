@@ -168,6 +168,12 @@ class HarborSpiFlashController extends BridgeModule
     // USRCCLKO (the CCLK ball has no user pad, like the ECP5 USRMCLK) instead
     // of exposing a spi_clk port. Mutually exclusive with useUsrmclk.
     bool useStartupe2 = false,
+    // FPGA standalone builds: own the quad/dual IO pads. Instead of exposing
+    // split spi_io_out/oe/in for an external pad ring, create one inout `spi_io`
+    // pad driven through a TriStateBuffer (synthesis infers the IOBUF, the
+    // constraint file applies the pin + IOSTANDARD). Leave false when a
+    // hand-written top or shared-bus mux owns the pads (e.g. Tiny Tapeout).
+    bool ownPads = false,
     // I4: WIP-poll watchdog bound (number of RDSR poll iterations before the
     // write engine gives up and raises wr_err). The default (~1M) is many
     // orders beyond any real sector-erase time, lower it for fast simulation.
@@ -194,12 +200,17 @@ class HarborSpiFlashController extends BridgeModule
       addOutput('spi_mosi');
       createPort('spi_miso', PortDirection.input);
     } else {
-      // Quad/Dual mode shares its IO lines, exposed as split tristate
-      // (out/oe/in) so the SoC/pad ring resolves the bidirectional lines.
+      // Quad/Dual mode shares its bidirectional IO lines. Either own the pad
+      // (one inout `spi_io` with an internal tristate) or expose split tristate
+      // (out/oe/in) for an external pad ring / shared-bus mux to resolve.
       final ioWidth = config.mode == HarborSpiFlashMode.quad ? 4 : 2;
-      addOutput('spi_io_out', width: ioWidth);
-      addOutput('spi_io_oe', width: ioWidth);
-      createPort('spi_io_in', PortDirection.input, width: ioWidth);
+      if (ownPads) {
+        createPort('spi_io', PortDirection.inOut, width: ioWidth);
+      } else {
+        addOutput('spi_io_out', width: ioWidth);
+        addOutput('spi_io_oe', width: ioWidth);
+        createPort('spi_io_in', PortDirection.input, width: ioWidth);
+      }
     }
 
     // The bus address must match the system bus width (the fabric connects
@@ -1001,11 +1012,21 @@ class HarborSpiFlashController extends BridgeModule
                 .swizzle() // {D3,D2,D1,D0}
           : [Const(0), mosiBit].swizzle(); // dual {D1,D0}
       // Drive all lines together (outputs when driveOut, inputs otherwise).
-      output('spi_io_out') <= ioOut;
-      output('spi_io_oe') <= driveOut.replicate(ioWidth);
-      spiIoIn <= input('spi_io_in');
-      // Status (RDSR) returns on DQ1 in standard-mode framing.
-      statBit <= input('spi_io_in')[1];
+      if (ownPads) {
+        // Own the pad: drive the inout `spi_io` through one bus tristate (synth
+        // infers the IOBUF) and read it back. driveOut gates the whole bus,
+        // matching the split path where oe = driveOut replicated.
+        final pad = inOut('spi_io');
+        pad <= TriStateBuffer(ioOut, enable: driveOut).out;
+        spiIoIn <= pad;
+        statBit <= pad[1];
+      } else {
+        output('spi_io_out') <= ioOut;
+        output('spi_io_oe') <= driveOut.replicate(ioWidth);
+        spiIoIn <= input('spi_io_in');
+        // Status (RDSR) returns on DQ1 in standard-mode framing.
+        statBit <= input('spi_io_in')[1];
+      }
     }
 
     // ECP5: drive the config-flash clock through USRMCLK (no I/O pad exists for

@@ -355,6 +355,54 @@ void main() {
     },
   );
 
+  test(
+    'readLevel ddr3Fast build emits the sRdCal read-calibration channel',
+    () async {
+      final ddr = HarborDdrController(
+        config: const HarborDdrConfig.artyS7(),
+        baseAddress: 0x80000000,
+        busAddressWidth: 32,
+        busDataWidth: 32,
+        clockHz: 83000000,
+        target: const HarborFpgaTarget.spartan7(
+          device: 's50',
+          package: 'csga324',
+        ),
+        asyncClock: true,
+        ddr3Fast: true,
+        readLevel: true,
+      );
+      await ddr.build();
+      final sv = ddr.generateSynth();
+      // The PHY gains the cal-channel INPUT ports (only present when wired: the
+      // sequencer carries tied-off cal ports either way, so assert on the PHY's
+      // rd_cal_active input, which exists only on the readLevel build).
+      expect(sv, contains('input logic rd_cal_active'));
+      expect(sv, contains('.IDELAY_TYPE("VAR_LOAD")'));
+    },
+  );
+
+  test('readLevel off leaves the read-cal channel out (baseline)', () async {
+    final ddr = HarborDdrController(
+      config: const HarborDdrConfig.artyS7(),
+      baseAddress: 0x80000000,
+      busAddressWidth: 32,
+      busDataWidth: 32,
+      clockHz: 83000000,
+      target: const HarborFpgaTarget.spartan7(
+        device: 's50',
+        package: 'csga324',
+      ),
+      asyncClock: true,
+      ddr3Fast: true,
+    );
+    await ddr.build();
+    final sv = ddr.generateSynth();
+    // The PHY has no cal ports off the build (the sequencer's tied-off cal ports
+    // remain, so key on the PHY's input port).
+    expect(sv, isNot(contains('input logic rd_cal_active')));
+  });
+
   test('asyncClock builds the CDC bridge and exposes ddr_clk', () async {
     final ddr = HarborDdrController(
       config: const HarborDdrConfig.orangeCrab(),

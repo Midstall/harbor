@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:rohd/rohd.dart';
 
 import '../blackbox/xilinx/xilinx.dart';
@@ -103,6 +101,12 @@ class DdrPhyXilinx extends DdrPhy {
     // ddr3Fast wiring), and ck333/ck90/idelayref200 come off the internal tree.
     // When false the existing 48 MHz IDDR path is byte-for-byte unchanged.
     bool ddr3Fast = false,
+    // Read-DQS window gate (ddr3Fast only). When true, the read capture window is
+    // opened by the DRAM's own read strobe (DQS captured as data on CK, its
+    // toggling picks the valid ctrl83 cycle) instead of the fixed CL+readSlack
+    // tap, which mis-frames under the i+d read cadence. False = the fixed-tap path
+    // is byte-for-byte unchanged.
+    bool dqsGatedRead = false,
     // ddr3Fast clock tree, supplied by the caller (genip builds the shared MMCM
     // DDR3 tree once so the sequencer's ddr_clk == this PHY's controller clock).
     // [clk] is the ctrl83 (= CK/4 = CLKDIV) controller clock, [ckFast] is the
@@ -150,6 +154,16 @@ class DdrPhyXilinx extends DdrPhy {
     // derived window tap, so firmware walks the coarse ctrl83 capture cycle to
     // land the BL8 line without a rebuild. Ignored on the 48 MHz IDDR path.
     Logic? windowSel,
+    // Read-calibration channel from the sequencer's sRdCal FSM. While
+    // [rdCalActive] the PHY takes its per-lane IDELAY tap/bitslip/window from
+    // these instead of the firmware regs above, and reports per-lane MPR match
+    // on [rdCalMatchOut]. Tied off (firmware path) when null.
+    Logic? rdCalActive,
+    Logic? rdCalIdelayLd,
+    Logic? rdCalTap, // 5-bit absolute IDELAY tap
+    Logic? rdCalLane, // laneSelW
+    Logic? rdCalWindow, // 4-bit read window for rdCalLane
+    Logic? rdCalBitslip,
     // When [writeLevel] is set, the sequencer's WL FSM drives these controls to
     // train each byte lane's write DQS-to-CK alignment. On ddr3Fast the Arty HR
     // bank has NO per-lane output ODELAY, so the only per-lane write actuator is
@@ -172,6 +186,13 @@ class DdrPhyXilinx extends DdrPhy {
     Logic? wlLane,
     Logic? wlTrained,
     Logic? wlDone,
+    // Firmware write-beat OVERRIDE (Xilinx runtime write-DQS re-center). When
+    // [wlPosOvrEn], each byte lane's write-beat rotation [pos] is forced to the
+    // per-lane 3-bit field in [wlPosOvr] (bits [l*4 +: 3]) instead of the WL-
+    // trained tap, so the FSBL can sweep the write launch at any CK without a
+    // rebuild (and without WL, which needs a roughly-right DQS to even train).
+    Logic? wlPosOvr,
+    Logic? wlPosOvrEn,
     // Write/command timing tuning, threaded from the region params + board
     // defaults (previously the HARBOR_DDR_CMDSLOT/WRSHIFT/WRBEAT env reads).
     // [cmdSlot] picks which of the 4 CK edges of a ddr3Fast tick carries the
@@ -274,6 +295,21 @@ class DdrPhyXilinx extends DdrPhy {
     final wlDoneIn = writeLevel
         ? addInput('wl_done', wlDone ?? Const(1))
         : null;
+    // Firmware write-beat override (per-lane 3-bit fields packed 4b/lane) + its
+    // enable. Tied off (disabled) when not driven.
+    // Fixed 8-bit (holds up to 2 lanes x 4b), matching the reg14 wr_beat_ovr
+    // output width; each lane slices its own 4b field. Fixed (not 4*laneCount) so
+    // a laneCount=1 (x8) part still accepts the 8-bit register value.
+    final wlPosOvrIn = writeLevel
+        ? addInput(
+            'wl_pos_ovr',
+            (wlPosOvr ?? Const(0, width: 8)).zeroExtend(8),
+            width: 8,
+          )
+        : null;
+    final wlPosOvrEnIn = writeLevel
+        ? addInput('wl_pos_ovr_en', wlPosOvrEn ?? Const(0))
+        : null;
 
     addOutput('rd_data', width: 32);
     addOutput('rd_valid');
@@ -339,17 +375,9 @@ class DdrPhyXilinx extends DdrPhy {
     // solver buildXilinxDdr3ClockTree uses), so the emitted MMCM/BUFG topology
     // matches the helper. This PHY is a plain Module (not a BridgeModule), so it
     // wires the tree inline rather than calling the helper directly.
-    // HARBOR_DDR_REALCLK: '1' = full probe (DDR3 tree + IDELAYCTRL + ISERDESE2
-    // DW8), 'treeonly' = the tree + IDELAYCTRL alone (the read path stays IDDR),
-    // to isolate the clock-tree ROUTE + IDELAYCTRL RDY proof from the ISERDESE2,
-    // which is UNROUTEABLE on openXC7/xc7s50 (the chipdb has no BUFR bels and no
-    // BUFG->ILOGIC-clock arc, so the SERDES CLK/CLKDIV/OCLK cannot reach the
-    // ILOGIC clock pins, the same wall that put the production read path on
-    // IDDR). Both modes build the tree, only '1' adds the ISERDESE2.
-    final realclkEnv = Platform.environment['HARBOR_DDR_REALCLK'];
-    final realclk = realclkEnv == '1' || realclkEnv == 'treeonly';
-    final realclkSerdes = realclkEnv == '1';
-    Logic? rcCk333, rcCtrl83;
+    // ISERDESE2-based read capture is UNROUTEABLE on openXC7/xc7s50 (no BUFR
+    // bels, no BUFG->ILOGIC-clock arc), which is why the production read path
+    // is IDDR.
     final Logic clk90;
     final Logic idelayRefclk;
     final double idelayRefMhz;
@@ -361,52 +389,6 @@ class DdrPhyXilinx extends DdrPhy {
       clk90 = ck90FastIn!;
       idelayRefclk = idelayRefIn!;
       idelayRefMhz = idelayRefFastMhz;
-    } else if (realclk) {
-      final srcHz = clkMhz * 1000000;
-      const rcDdrCkHz = 333333333;
-      const rcIdelayRefHz = 200000000;
-      final sol = solveDdr3ClockTree(srcHz, rcDdrCkHz, rcIdelayRefHz);
-      if (sol == null) {
-        throw StateError(
-          'HARBOR_DDR_REALCLK: no MMCME2 DDR3 clock-tree solution for '
-          'source=$srcHz (clkMhz=$clkMhz); pick an osc reaching a 600-1200 MHz '
-          'VCO.',
-        );
-      }
-      final rcMmcm = XilinxMmcme2Adv(
-        clkfboutMult: sol.mult,
-        clkout0Divide: sol.ckDivide, // CLKOUT0 = ck333
-        divclkDivide: sol.divclk.toDouble(),
-        clkinPeriod: 1e9 / srcHz,
-        clkout1Divide: sol.ctrlDivide, // CLKOUT1 = controller83 (CK/4)
-        clkout2Divide: sol.refDivide, // CLKOUT2 = idelayref200
-        clkout3Divide: sol.ckDivide.round(), // CLKOUT3 = ck90
-        clkout3Phase: 90.0,
-        name: 'realclk_mmcm',
-      );
-      rcMmcm.input('CLKIN1').srcConnection! <= clk;
-      rcMmcm.input('CLKIN2').srcConnection! <= Const(0);
-      rcMmcm.input('CLKINSEL').srcConnection! <= Const(1);
-      final rcFbBufg = XilinxBufg(name: 'realclk_fbbufg');
-      rcFbBufg.input('I').srcConnection! <= rcMmcm.output('CLKFBOUT');
-      rcMmcm.input('CLKFBIN').srcConnection! <= rcFbBufg.output('O');
-      rcMmcm.input('RST').srcConnection! <= reset;
-      rcMmcm.input('PWRDWN').srcConnection! <= Const(0);
-      Logic rcBuf(String clkout, String tag) {
-        final b = XilinxBufg(name: 'realclk_${tag}_bufg');
-        b.input('I').srcConnection! <= rcMmcm.output(clkout);
-        return b.output('O');
-      }
-
-      rcCk333 = rcBuf('CLKOUT0', 'ck'); // ISERDESE2 CLK
-      rcCtrl83 = rcBuf('CLKOUT1', 'ctrl'); // ISERDESE2 CLKDIV (SEPARATE BUFG)
-      final rcRef200 = rcBuf('CLKOUT2', 'idelayref'); // IDELAYCTRL REFCLK
-      final rcCk90 = rcBuf('CLKOUT3', 'ck90'); // write-launch phase = clk90
-      // The DDR3 tree DRIVES the read path: clk90 = ck90, and the single
-      // IDELAYCTRL reference = the real 200 MHz idelayref.
-      clk90 = rcCk90;
-      idelayRefclk = rcRef200;
-      idelayRefMhz = sol.vco / sol.refDivide / 1e6;
     } else if (mmcmPhaseClock) {
       final vcoMult = (600 / clkMhz).round().clamp(2, 64).toDouble();
       // CLKOUT1 divides the VCO down to ~200 MHz for the IDELAYCTRL reference.
@@ -462,22 +444,44 @@ class DdrPhyXilinx extends DdrPhy {
     // ck270 clock, no leaf overload (command stays on ck0, not the ck90 leaf that
     // overflowed to uncharacterized IMUX31 pips), no segbits patching.
     final ckLaunch = ddr3Fast ? ckFastIn! : clk;
-    ckOut <=
-        XilinxOddr(
-          c: ckLaunch,
-          d1: Const(1),
-          d2: Const(0),
-          r: reset,
-          name: 'ck_oddr',
-        ).q;
-    ckNOut <=
-        XilinxOddr(
-          c: ckLaunch,
-          d1: Const(0),
-          d2: Const(1),
-          r: reset,
-          name: 'ck_n_oddr',
-        ).q;
+    if (ddr3Fast) {
+      // True differential CK via OBUFDS. ONE ODDR toggles at the CK rate and the
+      // OBUFDS makes the complement AT THE PAD: the master OBUF (IOB33M) drives
+      // pin_ck and the slave OBUF plus IOB output inverter (IOB33S) drives
+      // pin_ck_n. A matched master/slave P/N pair keeps the CK/CK# crossing
+      // clean, so the DRAM on-die DLL holds lock at the rated CK speed. The old
+      // two independent single-ended ODDRs skewed the crossing (separate
+      // insertion delays), which drifted the DLL and made reads unstable.
+      final ckOddr = XilinxOddr(
+        c: ckLaunch,
+        d1: Const(1),
+        d2: Const(0),
+        r: reset,
+        name: 'ck_oddr',
+      );
+      final ckDiff = XilinxObufds(i: ckOddr.q, name: 'ck_obufds');
+      ckOut <= ckDiff.o;
+      ckNOut <= ckDiff.ob;
+    } else {
+      // DLL-off path: single-ended pseudo-differential pair (CK# is the inverse
+      // phase). Low speed, so a matched diff pad is not needed.
+      ckOut <=
+          XilinxOddr(
+            c: ckLaunch,
+            d1: Const(1),
+            d2: Const(0),
+            r: reset,
+            name: 'ck_oddr',
+          ).q;
+      ckNOut <=
+          XilinxOddr(
+            c: ckLaunch,
+            d1: Const(0),
+            d2: Const(1),
+            r: reset,
+            name: 'ck_n_oddr',
+          ).q;
+    }
 
     // Command/address: 1T SDR registers.
     //
@@ -652,6 +656,13 @@ class DdrPhyXilinx extends DdrPhy {
     // In ddr3Fast the write OSERDESE2s own the DQ pad IOBUFs, the read datapath
     // sources DQ from those IOBUF O outputs (this net), NOT the dq_in port.
     Logic? ddr3FastDqReadIn;
+    // Read-DQS pad IOBUF .O outputs (one per DQS lane), captured for the read
+    // window gate. Assigned in the DQS write loop, read in the dqsGatedRead block.
+    List<Logic>? dqsReadIn;
+    // The 4-bit runtime window selector (reg12/windowSel). Set in the windowOpen
+    // definition; the dqsGatedRead block reuses its low bits as the tunable
+    // strobe->window offset the FSBL read-setup sweeps.
+    Logic? windowIdxSig;
     // The single shared BUFH ck333 (built in the write block) that BOTH the
     // write OSERDESE2 CLK and the read ISERDESE2 CLK ride.
     Logic? ddr3FastSharedCk;
@@ -704,11 +715,9 @@ class DdrPhyXilinx extends DdrPhy {
     // shifts DQS's launch cycle INDEPENDENTLY of DQ by [dqsShift] whole ctrl100
     // ticks (each = ckCyclesPerTick CK), so the DQS strobe train walks relative
     // to CK/DQ in 4-CK steps: the coarse tDQSS knob. Positive = DQS later,
-    // negative = earlier. 0 = the old behaviour (DQS on the same wrBurst cycle),
-    // byte-identical. UberDDR3 lands writes open-loop on this exact part, so a
-    // fixed DQS-vs-CK offset exists, this knob finds it. Env HARBOR_DDR_DQSSHIFT.
-    final dqsShift =
-        int.tryParse(Platform.environment['HARBOR_DDR_DQSSHIFT'] ?? '') ?? 0;
+    // negative = earlier. 0 = DQS on the same wrBurst cycle as DQ, the launch
+    // that lands writes on this part.
+    final dqsShift = 0;
     // The DQS burst gate = wrPipe tapped [dqsShift] ticks off the DQ launch, then
     // registered the SAME +1 as wrBurst so it lands on the serialize cycle.
     final dqsLaunchIdx = (writeLaunch + dqsShift).clamp(0, wrPipeLen - 1);
@@ -747,31 +756,6 @@ class DdrPhyXilinx extends DdrPhy {
         dataBits: dataBits,
         name: 'wr_gearbox',
       );
-      // DM FORCE-LOW DIAGNOSTIC (HARBOR_DDR_FORCEDM0=1). The DM (data-mask) path
-      // gates every write beat: DM=1 masks the byte (DRAM ignores it), DM=0
-      // enables the write. If the byte-enable mask (wrSel <- bus.sel via the
-      // downsizer -> reqSel) ever arrives as 0 during a write, EVERY beat's DM is
-      // driven HIGH and the DRAM ignores the whole write, which reads back as
-      // write-invariant (A==B) exactly like the observed HW symptom. This flag
-      // forces the DM OSERDESE2 D-pins to all-0 (fully unmasked) unconditionally
-      // so the DM path can be RULED IN or OUT with one build: if forcing DM low
-      // makes writes land (A != B), the DM/reqSel logic is the bug.
-      final forceDm0 = Platform.environment['HARBOR_DDR_FORCEDM0'] == '1';
-      // DQ LOOPBACK SELF-TEST (HARBOR_DDR_LOOPBACK). Boundary-isolation probe: the
-      // read datapath sources DQ from the write IOBUF's .O (ddr3FastDqReadIn), so
-      // if we FORCE the pad OE on and drive a KNOWN per-beat pattern out the DQ
-      // OSERDESE, the read ISERDESE/beat/assembler chain must reconstruct that
-      // exact pattern. This removes the DRAM entirely from the read: a firmware
-      // read sweep (DDRTEST_3D tap/window) that returns the pattern PROVES the
-      // FPGA serialize->deserialize->assemble path is sound, so any real-read
-      // failure (MPR all-0) is the DRAM/command boundary, not read capture. If
-      // loopback ALSO fails, the read datapath itself is broken (fixable with no
-      // DRAM). No contention with the DRAM here because the current evidence is
-      // the DRAM never drives DQ (reads 0 everywhere), so the forced FPGA drive is
-      // the only driver on the pad. 1 = DC all-ones (max-margin level test),
-      // 2 = 0,1,0,1 alternating per beat (the MPR pattern, tests beat order too).
-      final loopback =
-          int.tryParse(Platform.environment['HARBOR_DDR_LOOPBACK'] ?? '') ?? 0;
       // Apply the sub-tick CWL residual as a beat rotation: shift the addressed
       // word's data/DM beats LATER by [wrBeatOffset] beats so the burst reaches
       // the pad CWL%ckCyclesPerTick CK into the launch tick (the whole-tick part
@@ -860,17 +844,14 @@ class DdrPhyXilinx extends DdrPhy {
       // registered wrBurstDqs burst cycle). wrBurstDqsPost = one cycle after.
       final wrBurstDqsPost = Logic(name: 'wr_burst_dqs_post');
       Sequential(clk, reset: reset, [wrBurstDqsPost < wrBurstDqs]);
-      final oeFast = (loopback != 0)
-          // Loopback self-test: hold the pad driven the WHOLE time so the read
-          // ISERDESE always samples the OSERDESE's driven pattern, not the DRAM.
-          ? Const(1).named('oe_fast')
-          : (wrPipe[writeLaunch] |
-                    wrBurst |
-                    wrBurstPost |
-                    wrPipe[dqsLaunchIdx] |
-                    wrBurstDqs |
-                    wrBurstDqsPost)
-                .named('oe_fast');
+      final oeFast =
+          (wrPipe[writeLaunch] |
+                  wrBurst |
+                  wrBurstPost |
+                  wrPipe[dqsLaunchIdx] |
+                  wrBurstDqs |
+                  wrBurstDqsPost)
+              .named('oe_fast');
       final dqT1 = (~oeFast).named('dq_t1');
 
       // UART-observable confirmation instrument (no LA): count write bursts where
@@ -1155,6 +1136,8 @@ class DdrPhyXilinx extends DdrPhy {
           final selected = wlLaneIn!.eq(Const(l, width: laneSelW));
           // Trained tap for this lane (4b field, only bits[2:0] are a valid beat).
           final trainedTap = wlTrainedIn!.getRange(l * 4, l * 4 + 3);
+          // Firmware override tap for this lane (low 3 bits of its 4b field).
+          final ovrTap = wlPosOvrIn!.getRange(l * 4, l * 4 + 3);
           Sequential(
             clk,
             reset: reset,
@@ -1166,18 +1149,26 @@ class DdrPhyXilinx extends DdrPhy {
             [
               wlDonePrev < wlDoneIn!,
               If(
-                wlEnIn!,
-                then: [
-                  // During WL: the selected lane's rotation follows the FSM rst/inc.
-                  If(selected & wlRstIn!, then: [pos < 0]),
-                  If(selected & wlIncIn!, then: [pos < pos + 1]),
-                ],
+                wlPosOvrEnIn!,
+                // Firmware override wins: force this lane's write-beat rotation
+                // to the swept tap (the runtime write-DQS re-center knob).
+                then: [pos < ovrTap],
                 orElse: [
-                  // After WL: latch the trained tap ONCE (rising edge of wlDone) so
-                  // normal writes rotate this lane's DQ+DQS by the CK-aligned beat.
                   If(
-                    wlDoneIn & ~wlDonePrev & ~applyDone,
-                    then: [pos < trainedTap, applyDone < 1],
+                    wlEnIn!,
+                    then: [
+                      // During WL: the selected lane follows the FSM rst/inc.
+                      If(selected & wlRstIn!, then: [pos < 0]),
+                      If(selected & wlIncIn!, then: [pos < pos + 1]),
+                    ],
+                    orElse: [
+                      // After WL: latch the trained tap ONCE (rising edge of
+                      // wlDone) so normal writes rotate by the CK-aligned beat.
+                      If(
+                        wlDoneIn & ~wlDonePrev & ~applyDone,
+                        then: [pos < trainedTap, applyDone < 1],
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -1204,8 +1195,7 @@ class DdrPhyXilinx extends DdrPhy {
       // on its (shared-timed) DQS. It is the only per-lane write alignment the Arty
       // HR bank allows (no ODELAYE2 for a sub-bit per-lane output delay). Sweep to
       // land lane 1, lane 0 (i<8) is untouched.
-      final dqBeat1 =
-          int.tryParse(Platform.environment['HARBOR_DDR_DQBEAT1'] ?? '') ?? 0;
+      const dqBeat1 = 0;
       // Per-DQ OSERDESE2 + pad IOBUF. IOBUF.O is the read return into the read
       // datapath's dqIn (replaces the dq_in port in ddr3Fast).
       final dqReadIn = <Logic>[];
@@ -1215,14 +1205,7 @@ class DdrPhyXilinx extends DdrPhy {
         int rot(int b) => (((b - laneShift) % 8) + 8) % 8;
         final beats = [
           for (var b = 0; b < 8; b++)
-            loopback == 1
-                // DC: every beat driven high -> reads back 0xFFFFFFFF at the tap.
-                ? Const(1)
-                : loopback == 2
-                // Alternating 0,1,0,1 -> the MPR pattern, reconstructs to
-                // 0x55/0xAA per byte when the beat order is right.
-                ? Const(b & 1)
-                : writeLevel
+            writeLevel
                 // WL build: RUNTIME per-lane rotation from the trained
                 // pointer [pos]. Output beat b sources DRAM beat
                 // (b - pos) mod 8. The 3-bit subtract wraps mod 8 and the
@@ -1275,11 +1258,7 @@ class DdrPhyXilinx extends DdrPhy {
       for (var l = 0; l < dmLanes; l++) {
         final dmBeats = [
           for (var b = 0; b < 8; b++)
-            // FORCE-DM0: drive every beat's DM low (0 = unmasked = write enabled)
-            // so the DM path cannot mask the burst regardless of wrSel/reqSel.
-            forceDm0
-                ? Const(0)
-                : dmLineReg.getRange(b * dmLanes + l, b * dmLanes + l + 1),
+            dmLineReg.getRange(b * dmLanes + l, b * dmLanes + l + 1),
         ];
         final os = XilinxOserdese2(
           clk:
@@ -1328,17 +1307,22 @@ class DdrPhyXilinx extends DdrPhy {
       // build rotates DQS via the trained wlPos). Sweep 0..7 to land lane1, lane0
       // (l==0) is untouched. An odd value shifts the DQS edges 0.5 CK vs DQ = a
       // discrete sub-beat DQS-vs-DQ phase (no fine MMCM phase on this HR bank).
-      final dqsBeat1 =
-          int.tryParse(Platform.environment['HARBOR_DDR_DQSBEAT1'] ?? '') ?? 0;
+      const dqsBeat1 = 0;
       // ORACLE-MATCH DQS CLOCK: the UberDDR3 Arty HR-bank oracle clocks the write
       // DQS OSERDES on `.CLK(!i_ddr3_clk)`: the CK net INVERTED ON-CHIP (exact
       // 180-deg, same net + matched insertion delay as CK/command), NOT a separate
       // CLKOUT4 180-deg net. Our separate CLKOUT4 had insertion-delay skew that
       // pushed the DQS edge off tDQSS at the DRAM (writes never latched, and the
       // CLKOUT4 phase sweep had no effect because the net skew dominated). Use the
-      // inverted CK net by default. HARBOR_DDR_DQSCLKOUT4=1 restores the old net.
-      final dqsUseInvCk = Platform.environment['HARBOR_DDR_DQSCLKOUT4'] != '1';
-      final dqsClk = dqsUseInvCk ? writeCk : writeCkDqs;
+      // inverted CK net.
+      const dqsUseInvCk = true;
+      final dqsClk = writeCk;
+      // Read-DQS tap: the DQS pad IOBUF's .O output is the strobe the DRAM drives
+      // back during a read. On creek's pinout DQS (K1/L1) is NOT clock-capable, so
+      // it cannot clock the read ISERDESE2 (openXC7 has no PHASER); instead capture
+      // it on CK like a DQ lane and use its toggling to GATE the read window in
+      // fabric (see the dqsGatedRead block below). One entry per DQS lane.
+      dqsReadIn = <Logic>[];
       for (var l = 0; l < dmLanes; l++) {
         final selected = writeLevel
             ? wlLaneIn!.eq(Const(l, width: laneSelW))
@@ -1412,12 +1396,15 @@ class DdrPhyXilinx extends DdrPhy {
           rst: reset,
           name: 'dqsnf_oserdes_$l',
         );
-        XilinxIobuf(
+        final dqsIob = XilinxIobuf(
           i: osP.oq,
           t: osP.tq,
           io: padDqsIn![l],
           name: 'dqsf_iobuf_$l',
         );
+        // The P-rail pad input = the read strobe (DQS# is the complement, unused
+        // for the gate). Feeds the read-DQS capture ISERDESE2 below.
+        dqsReadIn.add(dqsIob.o);
         XilinxIobuf(
           i: osN.oq,
           t: osN.tq,
@@ -1558,15 +1545,61 @@ class DdrPhyXilinx extends DdrPhy {
     final windowTap = ddr3Fast
         ? ((cl ~/ ckCyclesPerTick) + rdSlack).clamp(1, pipeLen - 1)
         : (cl + rdSlack - 1);
+    // Read-calibration channel from the sequencer's sRdCal FSM. On the read-cal
+    // build these drive the per-lane IDELAY/bitslip and the read window while
+    // rdCalAct; the firmware train regs (below) still apply otherwise (so Linux
+    // can retune post-boot). Tied off to the firmware path when null.
+    final hasRdCal = rdCalActive != null;
+    final rdCalAct = hasRdCal
+        ? addInput('rd_cal_active', rdCalActive)
+        : Const(0);
+    final rdCalLd = hasRdCal
+        ? addInput('rd_cal_idelay_ld', rdCalIdelayLd!)
+        : Const(0);
+    final rdCalTapIn = hasRdCal
+        ? addInput('rd_cal_tap', rdCalTap!, width: 5)
+        : Const(0, width: 5);
+    final rdCalLaneIn = hasRdCal
+        ? addInput('rd_cal_lane', rdCalLane!, width: laneSelW)
+        : Const(0, width: laneSelW);
+    final rdCalWinIn = hasRdCal
+        ? addInput('rd_cal_window', rdCalWindow!, width: 4)
+        : Const(0, width: 4);
+    final rdCalBs = hasRdCal
+        ? addInput('rd_cal_bitslip', rdCalBitslip!)
+        : Const(0);
+    // The cal-located read window: latch rdCalWindow while calibrating so it
+    // persists after the phase (reset to the compile-time tap for pre-cal reads).
+    final calWindowReg = Logic(name: 'cal_window_reg', width: 4);
+    if (hasRdCal) {
+      Sequential(
+        clk,
+        reset: reset,
+        resetValues: {calWindowReg: Const(windowTap, width: 4)},
+        [
+          If(rdCalAct, then: [calWindowReg < rdCalWinIn]),
+        ],
+      );
+    }
+
     // ddr3Fast can override the compile-time window tap at RUNTIME (reg12): the
     // BL8 line lands in a specific ctrl83 cycle after rd_start, and which cycle
     // is a board-tuning unknown, so firmware walks [windowSel] over the read
     // pipe to find the capturing cycle. selectFrom indexes rd_pipe by the
-    // 4-bit tap, without windowSel the static compile-time tap is used.
+    // 4-bit tap, without windowSel the static compile-time tap is used. With
+    // read-cal, the cal-live/cal-locked window wins.
     final Logic windowOpen;
-    if (ddr3Fast && windowSel != null) {
-      final wsel = addInput('window_sel', windowSel, width: 4);
-      windowOpen = wsel
+    if (ddr3Fast) {
+      final Logic winIdx;
+      if (hasRdCal) {
+        winIdx = mux(rdCalAct, rdCalWinIn, calWindowReg);
+      } else if (windowSel != null) {
+        winIdx = addInput('window_sel', windowSel, width: 4);
+      } else {
+        winIdx = Const(windowTap, width: 4);
+      }
+      windowIdxSig = winIdx;
+      windowOpen = winIdx
           .selectFrom([for (var t = 0; t < pipeLen; t++) rdPipe[t]])
           .named('window_open');
     } else {
@@ -1581,18 +1614,26 @@ class DdrPhyXilinx extends DdrPhy {
     // LiteDRAM read gearbox. OCLK/OCLKB are UNCONNECTED (the routing fix) and
     // CLK vs CLKDIV are two DISTINCT BUFG nets (the routing key).
     if (ddr3Fast) {
-      final ftrainable = idelayLd != null;
+      // VAR_LOAD IDELAY on either the firmware-train build or the read-cal build.
+      final ftrainable = idelayLd != null || hasRdCal;
       Logic? fLd, fCnt, fILane;
-      if (ftrainable) {
+      if (idelayLd != null) {
         fLd = addInput('idelay_ld', idelayLd);
         fCnt = addInput('idelay_cntvalue', idelayCntValue!, width: 5);
         fILane = addInput('idelay_lane', idelayLane!, width: idelayLane.width);
       }
+      // Effective IDELAY load pulse + tap: the read-cal channel wins while
+      // rdCalAct, else the firmware regs (or 0 when a build lacks them).
+      final effLoad = hasRdCal
+          ? mux(rdCalAct, rdCalLd, fLd ?? Const(0))
+          : (fLd ?? Const(0));
+      final effTap = hasRdCal
+          ? mux(rdCalAct, rdCalTapIn, fCnt ?? Const(0, width: 5))
+          : (fCnt ?? Const(0, width: 5));
       // Per-lane BITSLIP: runtime on the trainable path (a per-lane pulse gated
-      // by bitslipLane), else the compile-time HARBOR_DDR_BITSLIP for all lanes.
+      // by bitslipLane), else a static 0 rotation for all lanes.
       Logic? fBitslip, fBLane;
-      final envBitslip =
-          int.tryParse(Platform.environment['HARBOR_DDR_BITSLIP'] ?? '') ?? 0;
+      const envBitslip = 0;
       if (bitslip != null) {
         fBitslip = addInput('bitslip', bitslip);
         fBLane = addInput(
@@ -1614,37 +1655,48 @@ class DdrPhyXilinx extends DdrPhy {
       // (k-1). beat b's bit i sits at line[b*dataBits + i].
       final laneQ = <List<Logic>>[]; // laneQ[i] = [Q1..Q8] for lane i
       for (var i = 0; i < dataBits; i++) {
-        final laneHit = ftrainable
-            ? fILane!.eq(Const(i, width: fILane.width))
-            : null;
+        // Load-enable for DQ bit i. Firmware addresses per DQ bit (fILane == i);
+        // the read-cal channel addresses per BYTE lane (all 8 DQ of lane i~/8
+        // get the swept tap), so the cal hit is a byte-lane compare.
+        final fwHit = fILane != null
+            ? fILane.eq(Const(i, width: fILane.width))
+            : Const(0);
+        final calHit = Const(i ~/ 8, width: laneSelW).eq(rdCalLaneIn);
+        final laneHit = hasRdCal ? mux(rdCalAct, calHit, fwHit) : fwHit;
         final ddly = XilinxIdelaye2(
           // Read DQ from the write OSERDESE2's pad IOBUF O output (the PHY owns
           // the DQ pad in ddr3Fast), not the dq_in port.
           idatain: ddr3FastDqReadIn![i],
-          // HARBOR_DDR_IDELAY (0..31): static power-up read tap. In VAR_LOAD mode
-          // this is the tap the IDELAYE2 holds until firmware loads one. The Weir
-          // FSBL does not train, so the boot read eye = this value. Sweepable to
-          // centre the eye on a build that does not run a training pass (default
-          // 0 = off-centre). TEMP build knob.
-          idelayValue:
-              int.tryParse(Platform.environment['HARBOR_DDR_IDELAY'] ?? '') ??
-              (ftrainable ? 0 : readTaps),
+          // Static power-up read tap. In VAR_LOAD (trainable) mode the IDELAYE2
+          // holds 0 until firmware loads a tap; the FIXED (untrainable) path bakes
+          // readTaps.
+          idelayValue: ftrainable ? 0 : readTaps,
           c: clk, // ctrl83 (the IDELAY control clock)
           refClkFrequency: idelayRefMhz,
           idelayType: ftrainable ? 'VAR_LOAD' : 'FIXED',
-          ld: ftrainable ? (fLd! & laneHit!) : null,
-          cntValueIn: ftrainable ? fCnt : null,
+          ld: ftrainable ? (effLoad & laneHit) : null,
+          cntValueIn: ftrainable ? effTap : null,
           name: 'dqf_idelay_$i',
         ).dataout;
         // Per-lane BITSLIP pulse: on the trainable path, gate the shared pulse
-        // by a lane match, otherwise a compile-time constant per lane.
+        // by a lane match, otherwise a compile-time constant per lane. The
+        // read-cal channel wins while rdCalAct (byte-lane addressed).
         final Logic bsPulse;
-        if (fBitslip != null) {
-          bsPulse = (fBitslip & fBLane!.eq(Const(i, width: fBLane.width)))
-              .named('dqf_bitslip_$i');
+        if (fBitslip != null || hasRdCal) {
+          final fwBs = fBitslip != null
+              ? (fBitslip & fBLane!.eq(Const(i, width: fBLane.width)))
+              : Const(0);
+          final calBs =
+              rdCalBs & Const(i ~/ 8, width: laneSelW).eq(rdCalLaneIn);
+          bsPulse = (hasRdCal ? mux(rdCalAct, calBs, fwBs) : fwBs).named(
+            'dqf_bitslip_$i',
+          );
         } else {
           bsPulse = Const(0);
         }
+        // Fabric rotate register for this lane: advances one beat per bitslip
+        // pulse (firmware reg11 or the read-cal channel). Resets to 0; the FSBL
+        // sweeps it 0..7 exactly like it swept the old hardware BITSLIP.
         final iser = XilinxIserdese2(
           clk:
               readCk, // CK on the shared global BUFG net (== oracle i_ddr3_clk)
@@ -1704,30 +1756,8 @@ class DdrPhyXilinx extends DdrPhy {
                 for (var l = 0; l < laneCount; l++)
                   Const(l, width: laneSelW): laneFb[l],
               }, defaultValue: laneFb[0]);
-        // DIAGNOSTIC (HARBOR_DDR_WLFBTEST=1): substitute a SYNTHETIC clean 0->1
-        // feedback edge at tap 3 (the selected lane's pos >= 3) for the real DRAM
-        // capture. If the WL FSM then trains tap 3 with wl_done=1 and reg6 fb_map
-        // shows the edge (~0xF8), the FSM + actuator + sync + reg6 plumbing is
-        // PROVEN sound, so the observed fb_map=0 is a REAL-capture or DRAM-response
-        // fault (not the loop). If it still trains blind, the plumbing is the bug.
-        final wlFbTest = Platform.environment['HARBOR_DDR_WLFBTEST'] == '1';
-        // Self-contained tap counter (wlPos is out of scope in this sub-block):
-        // reset on wl_delay_rst (per lane), +1 per wl_delay_inc, so it mirrors the
-        // FSM's wlTap. The synthetic edge lands at tap 3.
-        final synthTap = Logic(name: 'wl_synth_tap', width: 4);
-        Sequential(clk, reset: reset, [
-          If(
-            wlRstIn!,
-            then: [synthTap < 0],
-            orElse: [
-              If(wlIncIn!, then: [synthTap < synthTap + 1]),
-            ],
-          ),
-        ]);
-        final synthFb = synthTap.gte(Const(3, width: 4)).named('wl_synth_fb');
-        final capFb = wlFbTest ? synthFb : selFb;
         final wlFbReg = Logic(name: 'wl_fb_reg');
-        Sequential(clk, reset: reset, [wlFbReg < capFb]);
+        Sequential(clk, reset: reset, [wlFbReg < selFb]);
         output('wl_feedback') <= wlFbReg;
       }
 
@@ -1749,6 +1779,120 @@ class DdrPhyXilinx extends DdrPhy {
         for (var b = 7; b >= 0; b--) beatVecs[b],
       ].swizzle().named('beat_line');
 
+      // READ-DQS WINDOW GATE (dqsGatedRead). The fixed windowTap guess mis-frames
+      // the capture under the i+d read cadence (icache fetch + dcache load both
+      // reading DRAM): the DQ line lands a variable number of ctrl83 cycles after
+      // rd_start, and a static tap latches the WRONG cycle (a stale line). Fix =
+      // let the read strobe pick the cycle. Capture DQS on CK exactly like a DQ
+      // lane (same IDELAY/CK/CLKDIV, so it deserializes cycle-aligned with
+      // beatLine) and open the window on the cycle its 8 beats carry a burst. DQS
+      // can't clock the capture on creek's non-clock-capable K1/L1 pins, but as
+      // captured data its toggling still marks the valid cycle.
+      Logic effWindowOpen = windowOpen;
+      // DIAGNOSTIC: sticky map of which rd_pipe taps [7:0] ever saw the DQS burst
+      // (0xAA/0x55). Read via reg7 (dbg_beats). Tells firmware WHERE the strobe
+      // frames relative to the read command, vs the working DQ window
+      // (RD_WINDOW_VAL). A single stable bit = a fixed offset exists; a spread =
+      // the strobe position varies per read (no fixed offset can align it).
+      Logic? dqsBurstMapDbg;
+      if (dqsGatedRead) {
+        // DQS IDELAY: VAR_LOAD so the FSBL can sweep the DQS eye centre INDEPENDENTLY
+        // of DQ. DQS is edge-aligned with DQ, so the DQ-centred tap lands the DQS on
+        // its transition edge (captured 0xA0 = half the beats metastable). Loaded
+        // via reg10 with a sentinel fILane index (= dataBits, one past the last DQ
+        // bit) the DQ bits do not use. Falls back to FIXED readTaps when the sentinel
+        // does not fit the lane field (e.g. x16 uses all 16 indices).
+        final sentinelFits =
+            ftrainable && fILane != null && dataBits < (1 << fILane.width);
+        final Logic dqsDdly = sentinelFits
+            ? XilinxIdelaye2(
+                idatain: dqsReadIn![0],
+                idelayValue: 0,
+                c: clk,
+                refClkFrequency: idelayRefMhz,
+                idelayType: 'VAR_LOAD',
+                ld: fLd! & fILane.eq(Const(dataBits, width: fILane.width)),
+                cntValueIn: fCnt,
+                // DQS is a strobe (clock-like), not a data line - the IDELAY must
+                // track it as a CLOCK to delay it correctly (UberDDR3 ddr3_phy.v).
+                signalPattern: 'CLOCK',
+                name: 'dqsf_gate_idelay',
+              ).dataout
+            : XilinxIdelaye2(
+                idatain: dqsReadIn![0],
+                idelayValue: readTaps,
+                c: clk,
+                refClkFrequency: idelayRefMhz,
+                idelayType: 'FIXED',
+                signalPattern: 'CLOCK',
+                name: 'dqsf_gate_idelay',
+              ).dataout;
+        final dqsIser = XilinxIserdese2(
+          clk: readCk,
+          clkb: readCk,
+          clkdiv: ddr3FastCkDiv,
+          ddly: dqsDdly,
+          bitslip: Const(0),
+          rst: reset,
+          dataWidth: 8,
+          name: 'dqsf_gate_iser',
+        );
+        final dqsBeats = [
+          for (var q = 8; q >= 1; q--) dqsIser.output('Q$q'),
+        ].swizzle().named('dqs_gate_beats');
+        // Burst present = the 8 strobe beats are the DDR3 read strobe's alternating
+        // pattern (0xAA or 0x55, either frame polarity). This marks ONLY the fully
+        // framed data-burst cycle: the read preamble (DQS low) and the floating
+        // tristate DQS between bursts are not alternating, so they don't false-open.
+        final dqsBurst =
+            (dqsBeats.eq(Const(0xAA, width: 8)) |
+                    dqsBeats.eq(Const(0x55, width: 8)))
+                .named('dqs_burst');
+        // Honor the strobe only inside a widened window around the CL tap so our own
+        // write strobe / floating idle DQS on the shared pad cannot false-trigger a
+        // read (writes assert no rd_start, so rd_pipe gates them out; this bounds
+        // the search to the real return region).
+        final loTap = (windowTap - 2).clamp(0, pipeLen - 1);
+        final hiTap = (windowTap + 3).clamp(0, pipeLen - 1);
+        final readWin = [
+          for (var t = loTap; t <= hiTap; t++) rdPipe[t],
+        ].swizzle().or().named('dqs_read_win');
+        final dqsGated = (dqsBurst & readWin).named('dqs_gated');
+        // TUNABLE strobe->window offset. The DQ line lands a fixed few ctrl83 cycles
+        // after the strobe is first detected (the read preamble puts DQS ahead of
+        // the DQ data). Delay [dqsGated] through a shift register and pick the tap
+        // with windowSel[2:0] (reg12), so the FSBL read-setup sweep AUTO-FINDS the
+        // offset in one build instead of a compile-time guess. Offset 0 (no runtime
+        // window reg) = fire on the detect cycle.
+        final dqsHist = Logic(name: 'dqs_gated_hist', width: 7);
+        Sequential(clk, reset: reset, [
+          dqsHist < [dqsHist.getRange(0, 6), dqsGated].swizzle(),
+        ]);
+        final dqsDelays = [dqsGated, for (var k = 0; k < 7; k++) dqsHist[k]];
+        final offSel = windowIdxSig != null
+            ? windowIdxSig.getRange(0, 3)
+            : Const(0, width: 3);
+        effWindowOpen = offSel.selectFrom(dqsDelays).named('dqs_window_open');
+        // DIAGNOSTIC: latch the RAW captured DQS beats whenever a read is returning
+        // (any of rd_pipe[3..7] high), so firmware sees what DQS-on-CK actually
+        // deserializes: 0xAA/0x55 = clean strobe (then it's a position/offset
+        // issue), 0x00/0xFF = static (OE not tristated / floating pad), anything
+        // else = wrong sampling phase (the DQS edge lands on the CK capture edge).
+        // Hold the last NON-ZERO capture in the return window: the DQS preamble and
+        // postamble are low (0x00), so latching every cycle would overwrite the
+        // burst with the postamble. Gating on dqsBeats!=0 keeps the actual toggling
+        // burst value.
+        // Cleared at each read start so reg7 reflects THIS read's strobe capture -
+        // lets the FSBL DQS-eye sweep read a fresh value per IDELAY tap.
+        final inReturn = rdPipe.getRange(3, 8).or().named('dqs_in_return');
+        final rawDqs = Logic(name: 'dqs_raw', width: 8);
+        Sequential(clk, reset: reset, [
+          If(rdStart, then: [rawDqs < Const(0, width: 8)]),
+          If(inReturn & dqsBeats.or(), then: [rawDqs < dqsBeats]),
+        ]);
+        dqsBurstMapDbg = rawDqs;
+      }
+
       // DEBUG: lane-0's 8 CAPTURED beats (beat0..7 in bits[0..7]) latched on
       // windowOpen -> STATUS reg7. For an MPR read (DRAM pattern 0,FF,0,FF,...)
       // this should read 0b01010101/0xAA, all-0 => the DRAM is NOT driving the
@@ -1757,7 +1901,7 @@ class DdrPhyXilinx extends DdrPhy {
       final dbgBeats = Logic(name: 'dbg_beats_int', width: 8);
       Sequential(clk, reset: reset, [
         If(
-          windowOpen,
+          effWindowOpen,
           then: [
             dbgBeats <
                 [for (var b = 7; b >= 0; b--) beatLine[b * dataBits]].swizzle(),
@@ -1765,7 +1909,41 @@ class DdrPhyXilinx extends DdrPhy {
         ),
       ]);
       addOutput('dbg_beats', width: 8);
-      output('dbg_beats') <= dbgBeats;
+      // With dqsGatedRead on, reg7 reports the DQS burst-position map instead of
+      // the DQ beats, so firmware can see where the strobe frames (the diagnostic).
+      output('dbg_beats') <= (dqsGatedRead ? dqsBurstMapDbg! : dbgBeats);
+
+      // Read-cal per-lane MPR match. Lane l's DQ0 across the 8 captured beats is
+      // an alternating byte (0x55 or 0xAA, phase set by which beat framed as
+      // beat0) exactly when that lane reads the DRAM's MPR 0,FF,0,FF pattern
+      // cleanly. Latch each lane's pattern on windowOpen and report the match so
+      // the sequencer's sRdCal sweep can locate every lane's read eye. Both
+      // alternating polarities count (bitslip picks the frame).
+      if (hasRdCal) {
+        final matchBits = <Logic>[];
+        for (var l = 0; l < laneCount; l++) {
+          final patReg = Logic(name: 'rd_cal_pat_$l', width: 8);
+          Sequential(clk, reset: reset, [
+            If(
+              windowOpen,
+              then: [
+                patReg <
+                    [
+                      for (var b = 7; b >= 0; b--)
+                        beatLine[b * dataBits + l * 8],
+                    ].swizzle(),
+              ],
+            ),
+          ]);
+          matchBits.add(
+            (patReg.eq(Const(0xAA, width: 8)) |
+                    patReg.eq(Const(0x55, width: 8)))
+                .named('rd_cal_match_$l'),
+          );
+        }
+        addOutput('rd_cal_match', width: laneCount);
+        output('rd_cal_match') <= matchBits.rswizzle();
+      }
 
       final asm = DdrBl8SerdesAssembler(
         clk,
@@ -1773,7 +1951,7 @@ class DdrPhyXilinx extends DdrPhy {
         beatLine: beatLine,
         rdStart: rdStart,
         beatSel: beatSel,
-        windowOpen: windowOpen,
+        windowOpen: effWindowOpen,
         dataBits: dataBits,
         name: 'rd_bl8_assembler',
       );
@@ -1786,7 +1964,7 @@ class DdrPhyXilinx extends DdrPhy {
           [
             idelayRdyNet,
             wrActive,
-            windowOpen,
+            effWindowOpen,
             beatHit,
             dqRise[0] ^ beatLine[0],
           ].swizzle();
@@ -1814,52 +1992,9 @@ class DdrPhyXilinx extends DdrPhy {
     // IDDR (SAME_EDGE on clk90). Q1 = rising-edge capture, Q2 = falling-edge.
     final q1Bits = <Logic>[]; // rise
     final q2Bits = <Logic>[]; // fall
-    // Viability probe: route the IDDR capture clock through a BUFIO instead of
-    // straight off the clk90 BUFG net, to prove openXC7 can place+route a
-    // BUFIO driving an IDDR clock pin (the DQS-synchronous capture prereq).
-    // Functionally a no-op-ish 1:1 buffer of clk90. Guarded so normal builds
-    // are unaffected.
-    final Logic iddrClk = Platform.environment['HARBOR_DDR_BUFIOTEST'] == '1'
-        ? XilinxBufio(i: clk90, name: 'dq_iddr_bufio').o
-        : clk90;
-    // REALCLK probe: DQ bit 0 is captured by the ISERDESE2 DATA_WIDTH=8 off the
-    // DDR3 clock tree instead of the IDELAYE2+IDDR pair (an IOB can host only
-    // ONE input primitive + one IDELAY, so the SERDES and the IDDR cannot share
-    // dqIn[0]'s site). ISERDESE2 IOBDELAY=IFD routes the pad through its own
-    // IDELAY into DDLY, so no separate IDELAYE2 is needed on that pad. Its Q1..Q8
-    // are folded into the LA probe below. Q1/Q2 stand in for the bit-0 capture.
-    Logic realclkProbe = Const(0);
+    // The IDDR capture clock is the clk90 BUFG net directly.
+    final Logic iddrClk = clk90;
     for (var i = 0; i < dataBits; i++) {
-      if (realclkSerdes && i == 0) {
-        // IOBDELAY=IFD: the pad routes through an IDELAYE2 into the ISERDESE2's
-        // DDLY (the SERDES DDLY pin is illegal directly off an input buffer,
-        // the IDELAY sits between). One IDELAY + one ISERDESE2 share the pad's
-        // IOB, which is the standard IFD arrangement (this bit does NOT get the
-        // IDDR read path, so there is no double-input-primitive conflict).
-        final rcDdly = XilinxIdelaye2(
-          idatain: dqIn[0],
-          idelayValue: readTaps,
-          c: rcCtrl83!,
-          refClkFrequency: idelayRefMhz,
-          name: 'realclk_idelay',
-        ).dataout;
-        final rcIser = XilinxIserdese2(
-          clk: rcCk333!,
-          clkb: rcCk333, // IS_CLKB_INVERTED handles the complement on-chip
-          clkdiv: rcCtrl83, // SEPARATE BUFG net from CLK = the routing proof
-          ddly: rcDdly, // IOBDELAY=IFD: pad -> IDELAYE2 -> SERDES
-          bitslip: Const(0),
-          rst: reset,
-          dataWidth: 8,
-          name: 'realclk_iser',
-        );
-        q1Bits.add(rcIser.q1);
-        q2Bits.add(rcIser.q2);
-        realclkProbe = [
-          for (var q = 1; q <= 8; q++) rcIser.output('Q$q'),
-        ].swizzle().xor().named('realclk_probe_bit');
-        continue;
-      }
       final laneHit = trainable
           ? ilanePort!.eq(Const(i, width: ilanePort.width))
           : null;
@@ -1871,9 +2006,7 @@ class DdrPhyXilinx extends DdrPhy {
         // static path keeps its measured [readTaps] FIXED tap. REFCLK_FREQUENCY
         // must equal the ACTUAL IDELAYCTRL reference (208 MHz off CLKOUT1) for
         // correct tap resolution.
-        idelayValue:
-            int.tryParse(Platform.environment['HARBOR_DDR_IDELAY'] ?? '') ??
-            (trainable ? 0 : readTaps),
+        idelayValue: trainable ? 0 : readTaps,
         c: clk,
         refClkFrequency: idelayRefMhz,
         idelayType: trainable ? 'VAR_LOAD' : 'FIXED',
@@ -1937,9 +2070,7 @@ class DdrPhyXilinx extends DdrPhy {
         ),
       ).named('beat_word');
     } else {
-      final bitslipSel =
-          int.tryParse(Platform.environment['HARBOR_DDR_BITSLIP'] ?? '') ?? 0;
-      beatWord = beatFor(bitslipSel).named('beat_word');
+      beatWord = beatFor(0).named('beat_word');
     }
 
     final assembler = DdrReadWordAssembler(
@@ -1955,49 +2086,6 @@ class DdrPhyXilinx extends DdrPhy {
     rdData <= assembler.rdData;
     rdValid <= assembler.rdValid;
 
-    // ROUTING DE-RISK PROBE (HARBOR_DDR_ISERTEST=1): prove that a single
-    // ISERDESE2 ROUTES when its CLK and CLKDIV come from TWO SEPARATE BUFG
-    // clocks (the UberDDR3 / LiteDRAM arrangement) instead of the same net
-    // (which hit overused=32 with CLKDIV forced onto the fabric CLK0 track).
-    // This is a topological routing test only, NOT functional DDR: CLK is a
-    // fast BUFG net, CLKDIV is a DISTINCT slower BUFG net (4:1 in the MMCM
-    // branch), IOBDELAY=IFD feeds DDLY from an IDELAYE2, and q1^q2 is consumed
-    // into dbg_probe so the primitive is not optimized away. Guarded so normal
-    // builds are byte-identical.
-    Logic iserProbe = Const(0);
-    if (Platform.environment['HARBOR_DDR_ISERTEST'] == '1') {
-      // Two DISTINCT BUFG-driven clock nets. CLK = fast (clk90's BUFG net in
-      // the MMCM branch, or clk otherwise). CLKDIV = a SEPARATE BUFG off clk.
-      // Two BUFGs off the same source net stay distinct nets in nextpnr (they
-      // are not merged), which is exactly what the ISERDESE2 CLK vs CLKDIV
-      // routing needs: two independent BUFG->clock-tree drivers.
-      final iserFastBufg = XilinxBufg(name: 'iser_fast_bufg');
-      iserFastBufg.input('I').srcConnection! <= clk90;
-      final iserFast = iserFastBufg.output('O');
-      final iserSlowBufg = XilinxBufg(name: 'iser_slow_bufg');
-      iserSlowBufg.input('I').srcConnection! <= clk;
-      final iserSlow = iserSlowBufg.output('O');
-      // A delayed pad net for DDLY (IOBDELAY=IFD path). Reuse dqIn[0] through a
-      // dedicated IDELAYE2 so the ISERDESE2's D-side is a real IOB delay net.
-      final iserDdly = XilinxIdelaye2(
-        idatain: dqIn[0],
-        idelayValue: readTaps,
-        c: clk,
-        refClkFrequency: idelayRefMhz,
-        name: 'iser_probe_idelay',
-      ).dataout;
-      final iser = XilinxIserdese2(
-        clk: iserFast,
-        clkb: iserFast, // internal IS_CLKB_INVERTED handles the complement
-        clkdiv: iserSlow, // SEPARATE BUFG net = the UberDDR3 fix under test
-        ddly: iserDdly,
-        bitslip: Const(0),
-        dataWidth: 8,
-        name: 'iser_probe',
-      );
-      iserProbe = (iser.q1 ^ iser.q2).named('iser_probe_bit');
-    }
-
     // Logic-analyzer debug probe: PHY-internal fabric signals not visible on a
     // pad. MUST be fabric nets, NOT the ODDR Q outputs (those are IOB-bound and
     // fault nextpnr with "illegal fanout"). [4]=windowOpen (read-window pulse,
@@ -2012,12 +2100,6 @@ class DdrPhyXilinx extends DdrPhy {
     // the same RDY is read over MMIO via the controller STATUS register
     // (idelay_rdy). The ISERDESE2 Q1..Q8 activity is folded into bit[0].
     output('dbg_probe') <=
-        [
-          realclk ? idelayRdyNet : windowOpen,
-          wrActive,
-          windowOpen,
-          beatHit,
-          dqRise[0] ^ iserProbe ^ realclkProbe,
-        ].swizzle();
+        [windowOpen, wrActive, windowOpen, beatHit, dqRise[0]].swizzle();
   }
 }

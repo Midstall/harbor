@@ -8,6 +8,30 @@ import 'cpu.dart';
 /// Devices don't extend this directly. Instead, they implement
 /// [HarborDeviceTreeNodeProvider] and return a [HarborDeviceTreeNode] from
 /// [HarborDeviceTreeNodeProvider.dtNode].
+/// A raw device-tree child node nested under a peripheral's [HarborDeviceTreeNode].
+///
+/// Unlike [HarborDeviceTreeNode] it has no required compatible/reg, so it models
+/// both container nodes (e.g. `partitions`) and unit-addressed leaves (e.g.
+/// `partition@0`, whose `reg` is a `<offset size>` pair under the container's own
+/// #address-cells/#size-cells). Values follow the same encoding as node
+/// properties: [String] -> "str", [int] -> <n>, [List<int>] -> <0x.. 0x..>.
+class HarborDeviceTreeChild {
+  /// The literal node name, e.g. `partitions` or `partition@300000`.
+  final String name;
+
+  /// Node properties (e.g. `label`, `reg`, `compatible`, `#address-cells`).
+  final Map<String, Object> properties;
+
+  /// Nested child nodes, one level deeper.
+  final List<HarborDeviceTreeChild> children;
+
+  const HarborDeviceTreeChild({
+    required this.name,
+    this.properties = const {},
+    this.children = const [],
+  });
+}
+
 class HarborDeviceTreeNode with HarborPrettyString {
   /// Device tree `compatible` strings.
   ///
@@ -35,6 +59,9 @@ class HarborDeviceTreeNode with HarborPrettyString {
   /// Values can be [int], [String], [List<int>], or [bool].
   final Map<String, Object> properties;
 
+  /// Nested child nodes (e.g. a `partitions` container under a flash node).
+  final List<HarborDeviceTreeChild> children;
+
   const HarborDeviceTreeNode({
     required this.compatible,
     required this.reg,
@@ -42,6 +69,7 @@ class HarborDeviceTreeNode with HarborPrettyString {
     this.interruptController = false,
     this.interruptCells = 1,
     this.properties = const {},
+    this.children = const [],
   });
 
   /// The primary compatible string (first in the list).
@@ -287,6 +315,10 @@ class HarborDeviceTreeGenerator {
           );
         }
 
+        for (final child in node.children) {
+          _emitChild(buf, child, '            ');
+        }
+
         buf.writeln('        };');
       }
 
@@ -295,6 +327,18 @@ class HarborDeviceTreeGenerator {
 
     buf.writeln('};');
     return buf.toString();
+  }
+
+  /// Recursively emits a nested [HarborDeviceTreeChild] at [indent].
+  void _emitChild(StringBuffer buf, HarborDeviceTreeChild c, String indent) {
+    buf.writeln('$indent${c.name} {');
+    for (final entry in c.properties.entries) {
+      buf.writeln('$indent    ${entry.key} = ${_formatValue(entry.value)};');
+    }
+    for (final child in c.children) {
+      _emitChild(buf, child, '$indent    ');
+    }
+    buf.writeln('$indent};');
   }
 
   String _formatValue(Object value) {

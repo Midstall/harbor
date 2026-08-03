@@ -67,6 +67,15 @@ class WishboneDecoder extends BridgeModule {
       slaveDatas.add(s.datMiso);
     }
 
+    // Bus-error termination for unmapped addresses. A cycle that decodes to no
+    // slave must be TERMINATED, not left with ack deasserted forever: an
+    // ack-only master (the caches, CPU) stalls on the missing ack and wedges the
+    // whole bus - the CPU hangs, and even the debug SBA can no longer read
+    // memory. Instead, ack the cycle (so it completes and the bus frees) and
+    // raise err (so an err-aware master faults it as a bus/access error).
+    final anyHit = hitBits.reduce((a, b) => a | b).named('any_hit');
+    final noMatch = (m.cyc & m.stb & ~anyHit).named('no_match');
+
     // Mux responses back to master
     final muxedAck = Logic(name: 'muxed_ack');
     final muxedData = Logic(name: 'muxed_data', width: config.dataWidth);
@@ -79,9 +88,12 @@ class WishboneDecoder extends BridgeModule {
           hitBits[i],
           then: [muxedAck < slaveAcks[i], muxedData < slaveDatas[i]],
         ),
+      // Self-terminate an unmapped access so the bus never wedges.
+      If(noMatch, then: [muxedAck < Const(1)]),
     ]);
 
     m.ack <= muxedAck;
     m.datMiso <= muxedData;
+    if (m.err != null) m.err! <= noMatch;
   }
 }

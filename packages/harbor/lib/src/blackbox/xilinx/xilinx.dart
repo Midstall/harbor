@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:rohd/rohd.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 
@@ -387,11 +385,9 @@ XilinxDdr3Clocks buildXilinxDdr3ClockTree(
       clkout1Divide: sol.ctrlDivide,
       clkout2Divide: sol.refDivide,
       clkout3Divide: sol.ckDivide.round(),
-      // ck90 write-launch phase. Sweepable (env HARBOR_DDR_CK90PHASE) to find the
-      // phase that closes the write eye vs DDR error count, default 90.
-      clkout3Phase:
-          double.tryParse(Platform.environment['HARBOR_DDR_CK90PHASE'] ?? '') ??
-          90.0,
+      // ck90 write-launch phase: 90 deg centers the write eye (hardware-swept,
+      // 0/90/180/270 = errs 3/2/16/16, flat across 68-113).
+      clkout3Phase: 90.0,
       // CLKOUT4 = DQS launch CK (same divide as CK, phase = dqsPhaseDeg,
       // default 180 = oracle !i_ddr3_clk).
       clkout4Divide: sol.ckDivide.round(),
@@ -434,6 +430,80 @@ XilinxDdr3Clocks buildXilinxDdr3ClockTree(
     // Core clock on its own global BUFG (CLKOUT5), only when requested.
     coreClk: coreDivide == null ? null : bufOut('CLKOUT5', 'core'),
     coreClkMhz: coreDivide == null ? null : sol.vco / coreDivide / 1e6,
+  );
+}
+
+/// A standalone core/sys clock PLL for the single-oscillator ddr3Fast boards: a
+/// SECOND PLLE2_ADV off the SAME oscillator as the DDR MMCM (both fed from one
+/// shared input BUFG so openXC7 accepts two PLLs on the one clock-capable pin).
+///
+/// This exists because folding the core clock onto a spare CLKOUT of the DDR
+/// MMCM makes the core (sys) clock and the DDR controller (ctrl) clock two
+/// outputs of ONE VCO, hence phase-locked at a fixed sub-cycle relationship. The
+/// async 2-FF gray synchronizer in the sys<->ctrl CDC bridge then sits
+/// metastable at that pathological fixed phase and resolves the SAME wrong way,
+/// corrupting the crossed read data intermittently (the creek Weir->Ferrite
+/// boot coin-flip: the first ifetch of Ferrite's entry comes back as an illegal
+/// instruction, mcause=2). Two SEPARATE PLLs each have their own VCO, so their
+/// relative phase drifts within the PLL jitter bounds: the crossing is genuinely
+/// asynchronous and the 2-FF synchronizer works as designed. A dedicated core
+/// PLL also decouples the core frequency from the DDR clock tree (independent
+/// CPU frequency scaling).
+///
+/// [source] must already be BUFG-buffered and shared with the DDR PLL. Returns
+/// the (global-BUFG) core clock, the PLL LOCKED, and the realised MHz.
+({Logic coreClk, Logic locked, double coreMhz}) buildXilinxCorePll(
+  BridgeModule parent, {
+  required Logic source,
+  required int sourceHz,
+  required int coreClkHz,
+  String name = 'coreclk',
+}) {
+  // Solve VCO = sourceHz * mult in the PLLE2 800..1600 MHz band with an integer
+  // CLKOUT0 divide (1..128) landing coreClkHz. Prefer the highest in-band VCO
+  // (lowest jitter). divclk stays 1 (the source is already a clean osc rate).
+  int? bestMult, bestDiv;
+  double bestVco = 0;
+  for (var mult = 1; mult <= 64; mult++) {
+    final vco = sourceHz.toDouble() * mult;
+    if (vco < 800e6 || vco > 1600e6) continue;
+    final div = (vco / coreClkHz).round();
+    if (div < 1 || div > 128) continue;
+    // Require the realised rate to be within 0.5% of the request.
+    if ((vco / div - coreClkHz).abs() / coreClkHz > 0.005) continue;
+    if (vco > bestVco) {
+      bestVco = vco;
+      bestMult = mult;
+      bestDiv = div;
+    }
+  }
+  if (bestMult == null) {
+    throw StateError(
+      'No PLLE2 core-clock solution for source=$sourceHz core=$coreClkHz '
+      '(VCO 800-1600 MHz with an integer CLKOUT0 divide unreachable).',
+    );
+  }
+  final pll = parent.addSubModule(
+    XilinxPlle2Adv(
+      clkfboutMult: bestMult,
+      clkout0Divide: bestDiv!,
+      divclkDivide: 1,
+      clkinPeriod: 1e9 / sourceHz,
+      name: '${name}_pll',
+    ),
+  );
+  pll.input('CLKIN1').srcConnection! <= source;
+  pll.input('CLKIN2').srcConnection! <= Const(0);
+  pll.input('CLKINSEL').srcConnection! <= Const(1);
+  pll.input('CLKFBIN').srcConnection! <= pll.output('CLKFBOUT');
+  pll.input('RST').srcConnection! <= Const(0);
+  pll.input('PWRDWN').srcConnection! <= Const(0);
+  final b = parent.addSubModule(XilinxBufg(name: '${name}_bufg'));
+  b.input('I').srcConnection! <= pll.output('CLKOUT0');
+  return (
+    coreClk: b.output('O'),
+    locked: pll.output('LOCKED'),
+    coreMhz: bestVco / bestDiv / 1e6,
   );
 }
 
@@ -515,11 +585,51 @@ class XilinxIbuf extends BridgeModule {
   }
 }
 
-/// Xilinx 7-series OBUF: Output buffer.
+/// Xilinx 7-series OBUF: Output buffer. Drives the pad output [o] from the
+/// single-ended [i]. Leaving [i] unset keeps the bare open port for callers that
+/// wire `.input('I')` directly.
 class XilinxObuf extends BridgeModule {
-  XilinxObuf({super.name = 'obuf'}) : super('OBUF', isSystemVerilogLeaf: true) {
-    createPort('I', PortDirection.input);
+  /// Pad output net.
+  Logic get o => output('O');
+
+  XilinxObuf({Logic? i, super.name = 'obuf'})
+    : super('OBUF', isSystemVerilogLeaf: true) {
+    if (i != null) {
+      addInput('I', i);
+    } else {
+      createPort('I', PortDirection.input);
+    }
     addOutput('O');
+  }
+}
+
+/// Xilinx 7-series OBUFDS: differential output buffer. A single-ended input [i]
+/// drives a complementary pad pair: [o] (P) and [ob] (N). The DIFF IO standard
+/// (e.g. DIFF_SSTL135) is set by the XDC on the P/N pins, not on the primitive.
+///
+/// On openXC7 (nextpnr-xilinx pack_io_xc7) this packs to a MASTER OBUF on the
+/// IOB33M site driving the P pad from [i], plus a SLAVE OBUF on the paired
+/// IOB33S site driving the N pad through the slave IOB output inverter (O_ININV).
+/// One source, matched master/slave sites, and the complement generated at the
+/// pad, so the P/N pair tracks far better than two independent single-ended
+/// OBUFs. This gives the DRAM a clean differential CK so its on-die DLL holds
+/// lock at the rated CK speed.
+class XilinxObufds extends BridgeModule {
+  /// P output pad net.
+  Logic get o => output('O');
+
+  /// N output pad net (the complement).
+  Logic get ob => output('OB');
+
+  XilinxObufds({Logic? i, super.name = 'obufds'})
+    : super('OBUFDS', isSystemVerilogLeaf: true) {
+    if (i != null) {
+      addInput('I', i);
+    } else {
+      createPort('I', PortDirection.input);
+    }
+    addOutput('O');
+    addOutput('OB');
   }
 }
 
@@ -558,6 +668,48 @@ class XilinxIobuf extends BridgeModule {
       addInOut('IO', io);
     } else {
       createPort('IO', PortDirection.inOut);
+    }
+  }
+}
+
+/// Xilinx 7-series IOBUFDS: differential bidirectional I/O buffer (a true diff
+/// pair). Drives the complementary pad pair [io] (P) / [iob] (N) from the single-
+/// ended [i] when [t]=0 (tristate is active HIGH = high-Z), and returns the
+/// received differential value on [o]. Used for the DDR3 DQS strobe, a
+/// differential inout. The DIFF_SSTL135 IO standard is set by the XDC on the P/N
+/// pins, not the primitive. On openXC7 it packs to master/slave IOB33 sites (the
+/// same decomposition as OBUFDS, plus the input path).
+class XilinxIobufds extends BridgeModule {
+  /// Pad-read output (the received differential value).
+  Logic get o => output('O');
+
+  XilinxIobufds({
+    Logic? i,
+    Logic? t,
+    Logic? io,
+    Logic? iob,
+    super.name = 'iobufds',
+  }) : super('IOBUFDS', isSystemVerilogLeaf: true) {
+    if (i != null) {
+      addInput('I', i);
+    } else {
+      createPort('I', PortDirection.input);
+    }
+    if (t != null) {
+      addInput('T', t); // tristate (active HIGH = high-Z)
+    } else {
+      createPort('T', PortDirection.input);
+    }
+    addOutput('O');
+    if (io != null) {
+      addInOut('IO', io); // P pad
+    } else {
+      createPort('IO', PortDirection.inOut);
+    }
+    if (iob != null) {
+      addInOut('IOB', iob); // N pad
+    } else {
+      createPort('IOB', PortDirection.inOut);
     }
   }
 }
@@ -917,6 +1069,10 @@ class XilinxIdelaye2 extends BridgeModule {
     // Absolute 5-bit tap value loaded on an [ld] pulse in VAR_LOAD mode. Ignored
     // (tied 0) in the other modes.
     Logic? cntValueIn,
+    // 'DATA' for a data line, 'CLOCK' for a strobe (DQS). A clock-like signal
+    // needs the CLOCK pattern for the IDELAY to track it correctly (per UberDDR3,
+    // the DQS read IDELAY uses SIGNAL_PATTERN=CLOCK).
+    String signalPattern = 'DATA',
     super.name = 'idelay',
   }) : super('IDELAYE2', isSystemVerilogLeaf: true) {
     createParameter('IDELAY_TYPE', '"$idelayType"');
@@ -926,9 +1082,55 @@ class XilinxIdelaye2 extends BridgeModule {
     createParameter('REFCLK_FREQUENCY', '$refClkFrequency');
     createParameter('CINVCTRL_SEL', '"FALSE"');
     createParameter('PIPE_SEL', '"FALSE"');
-    createParameter('SIGNAL_PATTERN', '"DATA"');
+    createParameter('SIGNAL_PATTERN', '"$signalPattern"');
     addInput('IDATAIN', idatain);
     addInput('DATAIN', Const(0));
+    addInput('C', c ?? Const(0));
+    addInput('CE', ce ?? Const(0));
+    addInput('INC', inc ?? Const(0));
+    addInput('LD', ld ?? Const(0));
+    addInput('LDPIPEEN', Const(0));
+    addInput('REGRST', Const(0));
+    addInput('CINVCTRL', Const(0));
+    addInput('CNTVALUEIN', cntValueIn ?? Const(0, width: 5), width: 5);
+    addOutput('DATAOUT');
+    addOutput('CNTVALUEOUT', width: 5);
+  }
+}
+
+/// Xilinx 7-series ODELAYE2: the write-path analogue of IDELAYE2 - delays an
+/// output ([odatain]) to [dataout] by a calibrated tap. HP (high-performance)
+/// banks ONLY; HR banks (Spartan-7, Artix HR) have no ODELAYE2 and use the CK@90
+/// write-launch path instead. Selected by [DdrParams.odelaySupported]; unused on
+/// the Arty S7 (HR bank). Shares the DDR3-GROUP IODELAY calibration with
+/// IDELAYCTRL. Kept for multi-FPGA (HP-bank) support.
+class XilinxOdelaye2 extends BridgeModule {
+  Logic get dataout => output('DATAOUT');
+  Logic get cntValueOut => output('CNTVALUEOUT');
+
+  XilinxOdelaye2({
+    required Logic odatain,
+    int odelayValue = 0,
+    Logic? c,
+    double refClkFrequency = 200.0,
+    String odelayType = 'FIXED',
+    Logic? ce,
+    Logic? inc,
+    Logic? ld,
+    Logic? cntValueIn,
+    String signalPattern = 'DATA',
+    super.name = 'odelay',
+  }) : super('ODELAYE2', isSystemVerilogLeaf: true) {
+    createParameter('ODELAY_TYPE', '"$odelayType"');
+    createParameter('ODELAY_VALUE', '$odelayValue');
+    createParameter('DELAY_SRC', '"ODATAIN"');
+    createParameter('HIGH_PERFORMANCE_MODE', '"TRUE"');
+    createParameter('REFCLK_FREQUENCY', '$refClkFrequency');
+    createParameter('CINVCTRL_SEL', '"FALSE"');
+    createParameter('PIPE_SEL', '"FALSE"');
+    createParameter('SIGNAL_PATTERN', '"$signalPattern"');
+    addInput('ODATAIN', odatain);
+    addInput('CLKIN', Const(0));
     addInput('C', c ?? Const(0));
     addInput('CE', ce ?? Const(0));
     addInput('INC', inc ?? Const(0));
@@ -993,7 +1195,10 @@ class XilinxIserdese2 extends BridgeModule {
     // wrapper uses that legitimately have no CLKDIV. The sim model still gets a
     // real clkdiv edge so the fabric-side tests deserialize.
     Logic? clkdiv,
-    required Logic ddly,
+    // Serial data from IDELAYE2 (IOBDELAY="IFD"/"BOTH"). Leave null for the OFB
+    // train path (IOBDELAY="NONE"), where DDLY is unused and MUST stay open - a
+    // GND tie is unrouteable at a fabric-pinned ISERDESE2.
+    Logic? ddly,
     required Logic bitslip,
     Logic? ce1,
     Logic? rst,
@@ -1002,6 +1207,14 @@ class XilinxIserdese2 extends BridgeModule {
     String interfaceType = 'NETWORKING',
     String iobDelay = 'IFD',
     int numCe = 1,
+    // OLOGIC->ILOGIC feedback capture. The bitslip-reference train serdes loops
+    // an OSERDESE2's OFB output back into this ISERDESE2 with IOBDELAY="NONE" and
+    // OFB_USED="TRUE" to model the ISERDES barrel-shift with no pad involved. Pass
+    // the OSERDESE2's OFB net as [ofb] AND set [ofbUsed]; the read data/DQS path
+    // leaves both unset so OFB stays an open port (the routing-critical default,
+    // see the OFB note below).
+    Logic? ofb,
+    bool ofbUsed = false,
     super.name = 'iserdes',
   }) : super('ISERDESE2', isSystemVerilogLeaf: true) {
     createParameter('DATA_RATE', '"$dataRate"');
@@ -1010,7 +1223,7 @@ class XilinxIserdese2 extends BridgeModule {
     createParameter('IOBDELAY', '"$iobDelay"');
     createParameter('NUM_CE', '$numCe');
     createParameter('SERDES_MODE', '"MASTER"');
-    createParameter('OFB_USED', '"FALSE"');
+    createParameter('OFB_USED', ofbUsed ? '"TRUE"' : '"FALSE"');
     createParameter('DYN_CLKDIV_INV_EN', '"FALSE"');
     createParameter('DYN_CLK_INV_EN', '"FALSE"');
     // Use the primitive's INTERNAL clock inversion for the complementary pins so
@@ -1032,16 +1245,27 @@ class XilinxIserdese2 extends BridgeModule {
     if (clkdiv != null) {
       addInput('CLKDIV', clkdiv);
     }
-    addInput('CLKDIVP', Const(0));
+    createPort(
+      'CLKDIVP',
+      PortDirection.input,
+    ); // open (unrouteable if GND-tied)
     // OCLK/OCLKB are OUTPUT-serdes clocks that physically exist ONLY in
     // INTERFACE_TYPE("MEMORY"). In NETWORKING (input-only capture) they must be
     // LEFT UNCONNECTED. The BUFG->ILOGIC/OCLKINV arc does not exist in 7-series
     // silicon (correctly absent from the chipdb), so ANY driver (Const OR a clock
     // net) makes the ISERDESE2 unrouteable. Matches UberDDR3's proven Arty S7
     // ISERDESE2 (.OCLK()/.OCLKB() open). So they are intentionally NOT declared.
-    // Data ins: D unused (IOBDELAY=IFD uses DDLY), OFB unused.
-    addInput('D', Const(0));
-    addInput('DDLY', ddly);
+    // Data ins: D is unused (IFD read path uses DDLY; the OFB train path uses
+    // OFB) and MUST be left UNCONNECTED, not tied to GND. Tying D to GND makes
+    // the router push $PACKER_GND_NET onto ILOGIC DINV_OUT, which is unrouteable
+    // at a fabric-pinned (off-pad) ISERDESE2 like the bitslip-reference train
+    // cell. Matches UberDDR3's proven `.D()` open. Declared as an open port.
+    createPort('D', PortDirection.input);
+    if (ddly != null) {
+      addInput('DDLY', ddly);
+    } else {
+      createPort('DDLY', PortDirection.input);
+    }
     // OFB is the OLOGIC->ILOGIC loopback feedback input. With OFB_USED("FALSE")
     // (IFD read path) it MUST be left UNCONNECTED, not tied to GND. Driving it
     // with Const(0) makes the router route $PACKER_GND_NET onto the ILOGIC OFB
@@ -1050,16 +1274,27 @@ class XilinxIserdese2 extends BridgeModule {
     // OSERDESE2's real D1 net for INT_R.../IMUX34 -> the permanent overused=32
     // (16x OLOGIC_D1 + 16x IMUX34). Declared as an open port (createPort, no
     // driver) so the emitted SV is `.OFB()` open, matching the UberDDR3 oracle.
-    createPort('OFB', PortDirection.input);
+    // The bitslip-reference train serdes is the exception: OFB_USED="TRUE" with a
+    // real OFB loopback net (the OLOGIC->ILOGIC feedback IS the intended path,
+    // no pad), so it binds OFB as a driven input.
+    if (ofbUsed && ofb != null) {
+      addInput('OFB', ofb);
+    } else {
+      createPort('OFB', PortDirection.input);
+    }
     // Control.
     addInput('CE1', ce1 ?? Const(1));
     addInput('CE2', Const(1));
     addInput('BITSLIP', bitslip);
     addInput('RST', rst ?? Const(0));
-    addInput('DYNCLKSEL', Const(0));
-    addInput('DYNCLKDIVSEL', Const(0));
-    addInput('SHIFTIN1', Const(0));
-    addInput('SHIFTIN2', Const(0));
+    // Unused control inputs are left OPEN (not GND-tied): a GND tie on these
+    // ILOGIC sitewires is unrouteable at a fabric-pinned (off-pad) ISERDESE2
+    // like the bitslip-reference train cell. Matches UberDDR3's proven open
+    // `.DYNCLKSEL()/.DYNCLKDIVSEL()/.SHIFTIN1()/.SHIFTIN2()`.
+    createPort('DYNCLKSEL', PortDirection.input);
+    createPort('DYNCLKDIVSEL', PortDirection.input);
+    createPort('SHIFTIN1', PortDirection.input);
+    createPort('SHIFTIN2', PortDirection.input);
     // Parallel outs: wrap all Q1..Q8 (Q1/Q2 used at width 2).
     for (var q = 1; q <= 8; q++) {
       addOutput('Q$q');

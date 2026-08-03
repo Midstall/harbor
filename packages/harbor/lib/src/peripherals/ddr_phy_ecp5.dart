@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:rohd/rohd.dart';
 
 import '../blackbox/ecp5/ecp5.dart';
@@ -714,17 +712,11 @@ class DdrPhyEcp5 extends DdrPhy {
       final pllFb = Logic(name: 'ddr_phy_pll_fb');
       // VCO must land in the ECP5 400-800 MHz band: VCO = clkMhz * vcoDiv.
       final vcoDiv = (600 / clkMhz).floor().clamp(2, 128);
-      // CLKOS (clk90 = write DQ + read launch/capture phase): HEAD's -90deg
-      // (3*vcoDiv/4), env CLKOS_CPHASE-overridable for the bench sweep.
-      final clkosCphase = int.parse(
-        Platform.environment['CLKOS_CPHASE'] ?? '${(3 * vcoDiv) ~/ 4}',
-      );
-      // CLKOS2 (clk90b = write DQS strobe phase): a 50%-duty output, default 0deg
-      // (~90deg from the -90deg DQ so the DQS edges sit centered in the DQ eyes),
-      // env CLKOS2_CPHASE-overridable for the DQS-vs-DQ centering sweep.
-      final clkos2Cphase = int.parse(
-        Platform.environment['CLKOS2_CPHASE'] ?? '0',
-      );
+      // CLKOS (clk90 = write DQ + read launch/capture phase): -90deg (3*vcoDiv/4).
+      final clkosCphase = (3 * vcoDiv) ~/ 4;
+      // CLKOS2 (clk90b = write DQS strobe phase): a 50%-duty output at 0deg
+      // (~90deg from the -90deg DQ so the DQS edges sit centered in the DQ eyes).
+      final clkos2Cphase = 0;
       final phyPll = Ecp5Ehxplll(
         clkiDiv: 1,
         clkfbDiv: 1,
@@ -1536,12 +1528,9 @@ class DdrPhyEcp5 extends DdrPhy {
       // (clkMhz >= ~144) -> wrShift 1 = OPTION A. Unconditional shift mis-aligns the
       // 48MHz write (word0 lands a tap late -> ddrtest E0). [dllOn] is defined once
       // up near the clock tree (it also selects the static x2 DDR datapath).
-      // Write-launch tap offset (OPTION A = 1). BENCH: env WRSHIFT sweeps it to
-      // find the slide that lands the write on this silicon (the write twin of the
-      // read-gate offset). DLL-off keeps 0.
-      final wrShift = dllOn
-          ? int.parse(Platform.environment['WRSHIFT'] ?? '1')
-          : 0;
+      // Write-launch tap offset (OPTION A = 1, the write twin of the read-gate
+      // offset). DLL-off keeps 0.
+      final wrShift = dllOn ? 1 : 0;
       // litedram ntaps = wrtap + 4 (ecp5ddrphy.py L447). One delay line. Taps
       // wrtap..wrtap+1 are the two data cycles, wrtap-1 / wrtap+2 frame the
       // preamble / postamble. OPTION A slides the window +1 tap (data at cwlSys+1..
@@ -1686,14 +1675,7 @@ class DdrPhyEcp5 extends DdrPhy {
       // be corrected separately. DQS + DM are already per-lane structures. The
       // DATA vector is split into byte lanes here. All-lanes-equal == the old
       // global slip (so WRBEATSLIP=3 reproduces the prior behavior exactly).
-      final wrBeatSlipLane = [
-        for (var l = 0; l < laneCount; l++)
-          int.parse(
-            Platform.environment['WRBEATSLIP$l'] ??
-                Platform.environment['WRBEATSLIP'] ??
-                '0',
-          ),
-      ];
+      final wrBeatSlipLane = List.filled(laneCount, 0);
       // Slip 4 beats by `slip` DDR beats, wrapping the head from the previous sclk
       // word (registered). slip=0 = exact identity.
       List<Logic> beatSlipBy(List<Logic> beats, int slip, String nm) {
@@ -3073,17 +3055,10 @@ class DdrPhyEcp5 extends DdrPhy {
       // ([readTaps], now wired). CLKOS_CPHASE is inert for read-vs-write (write +
       // read share clk90, so it shifts both together).
       // PER-LANE read deskew: byte0 (lane0 DQ0-7 rise) reads STALE on marginal
-      // HW reads while lane1/fall are clean = lane0 has a read-skew the single
-      // uniform DELAYG cannot center. READ_TAP_LANE0 (env, 0..127) overrides
-      // lane 0's static read tap independently. Other lanes keep [readTaps].
-      // Swept on HW to land lane0's rise edge. Default = readTaps (no change).
-      final readTapLane0 = int.parse(
-        Platform.environment['READ_TAP_LANE0'] ?? '$readTaps',
-      );
       for (var i = 0; i < dataBits; i++) {
         final dly = Ecp5Delayg(
           a: dqReadBits[i],
-          delValue: (i ~/ 8) == 0 ? readTapLane0 : readTaps,
+          delValue: readTaps,
           name: 'dq_dly_$i',
         );
         final iddr = Ecp5Iddrx1f(

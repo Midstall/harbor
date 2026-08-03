@@ -197,7 +197,9 @@ final rv32i = RiscVExtension(
       matchMask: 0x00100000,
       matchValue: 0x00000000,
       format: iType,
-      microcode: [RiscVTrapOp(8)], // Environment call
+      // Environment call: cause is the originating privilege (U=8/S=9/VS=10/
+      // M=11), so it re-encodes by mode at trap time, not a fixed 8.
+      microcode: [RiscVTrapOp(8, modeCause: true)],
     ),
     RiscVOperation(
       mnemonic: 'ebreak',

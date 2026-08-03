@@ -161,6 +161,16 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     HarborFpgaVendor.openXc7 => 'bit',
   };
 
+  /// prjxray architecture family string for the openXC7 flow.
+  ///
+  /// Used as the `fasm2frames --db-root $(XRAY_DB)/<family>` segment and the
+  /// `xc7frames2bit --part_file $(XRAY_DB)/<family>/<part>/part.yaml` path. Only
+  /// meaningful for the Xilinx vendors (empty otherwise).
+  String get _prjxrayFamily => switch (vendor) {
+    HarborFpgaVendor.vivado || HarborFpgaVendor.openXc7 => 'spartan7',
+    HarborFpgaVendor.ice40 || HarborFpgaVendor.ecp5 => '',
+  };
+
   /// Generates a Yosys synthesis TCL script for this FPGA target.
   ///
   /// Produces a JSON netlist for nextpnr (iCE40/ECP5) or a
@@ -356,6 +366,99 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     return buf.toString();
   }
 
+  /// Per-device DDR train-SERDES pre-place geometry for the openXC7 flow.
+  ///
+  /// The DDR PHY's bitslip-reference train SERDES must be pinned off the dead
+  /// `_SING` OLOGIC/ILOGIC tile (missing prjxray PIPs make its capture dead).
+  /// Lane 0 pins to `X<column>Y<baseY>`, lane `l` to
+  /// `X<column>Y<baseY + l*strideY>`; the dead `_SING` tile sits one stride
+  /// above lane 0 (`baseY - strideY`). Each lane's OSERDESE2/ISERDESE2 pair
+  /// shares the SAME tile (they loop back via OFB).
+  ///
+  /// Keyed by the lower-case device part. Add an entry per verified part.
+  static const Map<String, _DdrPreplaceGeom> _ddrPreplaceGeom = {
+    // Verified on the Arty S7 (xc7s50), 2 lanes: lane0 -> X0Y145,
+    // lane1 -> X0Y141, dead _SING -> X0Y149.
+    'xc7s50': _DdrPreplaceGeom(baseY: 145, strideY: -4, column: 0),
+  };
+
+  /// Generates the nextpnr-xilinx `--pre-place` Python script
+  /// (`support/nextpnr/constraints.py`) for the openXC7 DDR3 flow.
+  ///
+  /// It pins each of the [lanes] DDR train SERDES pairs off the dead `_SING`
+  /// tile using the [device]-keyed [_ddrPreplaceGeom]. When the device is not
+  /// in the map, the xc7s50 geometry is used as a fallback and a warning
+  /// header notes that the placement is unverified for the part.
+  String generateDdrPreplacePy({required int lanes}) {
+    final geom = _ddrPreplaceGeom[device.toLowerCase()];
+    // Fallback geometry (xc7s50) when the part is unknown: still emit, but flag.
+    final g =
+        geom ?? const _DdrPreplaceGeom(baseY: 145, strideY: -4, column: 0);
+    final singY =
+        g.baseY - g.strideY; // dead _SING tile, one stride above lane 0
+
+    final buf = StringBuffer();
+    if (geom == null) {
+      buf.writeln(
+        '# WARNING: device "$device" has no verified DDR train-SERDES tile',
+      );
+      buf.writeln(
+        '# placement in Harbor. The geometry below is the xc7s50 default and is',
+      );
+      buf.writeln(
+        '# UNVERIFIED for this part - confirm the OLOGIC/ILOGIC tile Y range.',
+      );
+    }
+    buf.writeln(
+      '# Pin the bitslip-reference train serdes off the _SING tile '
+      '(X${g.column}Y$singY, which has',
+    );
+    buf.writeln(
+      '# missing prjxray PIPs -> dead capture). Each lane\'s '
+      'OSERDESE2/ISERDESE2 pair',
+    );
+    buf.writeln(
+      '# must share the SAME ILOGIC/OLOGIC tile (they loop back via OFB).',
+    );
+    buf.writeln('def get_cells(part):');
+    buf.writeln('    return [c.second for c in ctx.cells if part in c.first]');
+    final pairs = [
+      for (var l = 0; l < lanes; l++)
+        "('$l', 'X${g.column}Y${g.baseY + l * g.strideY}')",
+    ];
+    buf.writeln('pairs = [${pairs.join(', ')}]');
+    buf.writeln('for suf, y in pairs:');
+    buf.writeln("    for c in get_cells('train_oserdes_' + suf):");
+    buf.writeln("        c.setAttr('BEL', 'OLOGIC_' + y + '/OSERDESE2')");
+    buf.writeln(
+      "        print('PREPLACE train_oserdes_%s -> OLOGIC_%s' % (suf, y))",
+    );
+    buf.writeln("    for c in get_cells('train_iserdes_' + suf):");
+    buf.writeln("        c.setAttr('BEL', 'ILOGIC_' + y + '/ISERDESE2')");
+    buf.writeln(
+      "        print('PREPLACE train_iserdes_%s -> ILOGIC_%s' % (suf, y))",
+    );
+    return buf.toString();
+  }
+
+  /// Generates the nextpnr-xilinx `--pre-route` BEL-placement diagnostic
+  /// (`support/nextpnr/show_bels.py`) for the openXC7 DDR3 flow. It prints
+  /// where the train SERDES landed after placement so a bad pin is visible.
+  String generateDdrShowBelsPy() {
+    final buf = StringBuffer();
+    buf.writeln('def show(name_part):');
+    buf.writeln('    found=False');
+    buf.writeln('    for c in ctx.cells:');
+    buf.writeln('        if name_part in c.first:');
+    buf.writeln(
+      '            print("BELCHK", c.first, "->", c.second.bel); found=True',
+    );
+    buf.writeln('    if not found: print("BELCHK none:", name_part)');
+    buf.writeln("show('ISERDESE2_train')");
+    buf.writeln("show('OSERDESE2_train')");
+    return buf.toString();
+  }
+
   /// Generates a complete Makefile for the FPGA build flow.
   String generateMakefile(String topCell) {
     final buf = StringBuffer();
@@ -391,6 +494,60 @@ class HarborFpgaTarget extends HarborDeviceTarget {
       buf.writeln('pack: \$(TOP).$bitstreamExtension');
       buf.writeln('\$(TOP).$bitstreamExtension: $intermediate');
       buf.writeln('\t$packCmd');
+    } else if (vendor == HarborFpgaVendor.openXc7) {
+      // openXC7 (nextpnr-xilinx + prjxray) flow: json -> fasm -> frames -> bit.
+      // The tools nextpnr-xilinx / fasm2frames / xc7frames2bit are assumed on
+      // PATH in the dev shell; the data files come from Make variables the
+      // caller (nix/user) can override with `?=`.
+      buf.writeln();
+      buf.writeln(
+        '# openXC7 (nextpnr-xilinx + prjxray) place-and-route + pack.',
+      );
+      buf.writeln(
+        '# CHIPDB / XRAY_DB / PART / SEED are overridable (nix supplies them).',
+      );
+      buf.writeln(
+        '# Default CHIPDB is the nextpnr-xilinx chipdb for this device/package.',
+      );
+      buf.writeln(
+        'CHIPDB ?= \$(NEXTPNR_XILINX_CHIPDB)/\$(DEVICE)\$(PACKAGE).bin',
+      );
+      buf.writeln('XRAY_DB ?= \$(PRJXRAY_DB)');
+      buf.writeln('PART ?= \$(DEVICE)\$(PACKAGE)-1');
+      buf.writeln('FAMILY = $_prjxrayFamily');
+      buf.writeln('SEED ?= 1');
+      buf.writeln(
+        '# --pre-place/--pre-route hooks activate only when Harbor emitted the',
+      );
+      buf.writeln(
+        '# DDR train-serdes scripts (openXC7 + DDR peripheral); empty otherwise.',
+      );
+      buf.writeln(
+        'PREPLACE := \$(if \$(wildcard support/nextpnr/constraints.py),'
+        '--pre-place support/nextpnr/constraints.py '
+        '--pre-route support/nextpnr/show_bels.py,)',
+      );
+      buf.writeln();
+      buf.writeln('pnr: \$(TOP).fasm');
+      buf.writeln('\$(TOP).fasm: \$(TOP).json \$(TOP).$constraintExtension');
+      buf.writeln(
+        '\tnextpnr-xilinx --chipdb \$(CHIPDB) --xdc \$(TOP).$constraintExtension '
+        '--json \$(TOP).json --write \$(TOP)_routed.json --fasm \$(TOP).fasm '
+        '\$(PREPLACE) --seed \$(SEED)',
+      );
+      buf.writeln();
+      buf.writeln('pack: \$(TOP).$bitstreamExtension');
+      buf.writeln('\$(TOP).frames: \$(TOP).fasm');
+      buf.writeln(
+        '\tfasm2frames --db-root \$(XRAY_DB)/\$(FAMILY) --part \$(PART) '
+        '\$(TOP).fasm \$(TOP).frames',
+      );
+      buf.writeln('\$(TOP).$bitstreamExtension: \$(TOP).frames');
+      buf.writeln(
+        '\txc7frames2bit --part_file \$(XRAY_DB)/\$(FAMILY)/\$(PART)/part.yaml '
+        '--part_name \$(PART) --frm_file \$(TOP).frames '
+        '--output_file \$(TOP).$bitstreamExtension',
+      );
     }
 
     // Bitstream programming (loads the board over USB/JTAG).
@@ -405,6 +562,7 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     buf.writeln('clean:');
     buf.writeln(
       '\trm -f \$(TOP).json \$(TOP).asc \$(TOP).config '
+      '\$(TOP).fasm \$(TOP).frames \$(TOP)_routed.json '
       '\$(TOP).bin \$(TOP).bit',
     );
     return buf.toString();
@@ -551,6 +709,27 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     }
     return buf.toString();
   }
+}
+
+/// DDR train-SERDES pre-place tile geometry for one FPGA part (openXC7 flow).
+///
+/// See [HarborFpgaTarget.generateDdrPreplacePy]. Lane `l`'s OSERDESE2/ISERDESE2
+/// pair pins to `X<column>Y<baseY + l*strideY>`.
+class _DdrPreplaceGeom {
+  /// OLOGIC/ILOGIC tile Y for lane 0.
+  final int baseY;
+
+  /// Per-lane Y delta (negative descends the tile column).
+  final int strideY;
+
+  /// OLOGIC/ILOGIC tile X column.
+  final int column;
+
+  const _DdrPreplaceGeom({
+    required this.baseY,
+    required this.strideY,
+    required this.column,
+  });
 }
 
 /// Describes a macro/tile module for hierarchical hardening.

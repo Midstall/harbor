@@ -199,6 +199,12 @@ class HarborL1ICache extends BridgeModule {
 
     // Miss/fill FSM state.
     final filling = Logic(name: 'filling');
+    // A flush (fence.i) mid-fill abandons the in-flight refill, but the MMU
+    // latched that read at arbitration and completes it regardless. `drain`
+    // holds the cache off starting a new fill until that stale completion has
+    // arrived and been discarded, so it can never land as word 0 of the next
+    // line (the creek Weir->Ferrite handoff corruption).
+    final drain = Logic(name: 'drain');
     // High for one cycle after a fill commits: the just-written entry was the
     // read-during-write target, so its registered read is only trustworthy the
     // cycle after. Gates the hit off for that settling cycle.
@@ -275,57 +281,86 @@ class HarborL1ICache extends BridgeModule {
       addrQ < reqAddr,
       if (dualPort) addrQ1! < reqAddr1,
       If(
-        reset | flush,
+        reset,
         then: [
           ...List.generate(numLines, (i) => lineValid[i] < 0),
           filling < 0,
           fillSettle < 0,
           memEnR < 0,
+          drain < 0,
         ],
         orElse: [
-          fillSettle < 0,
           If(
-            filling,
+            flush,
             then: [
+              ...List.generate(numLines, (i) => lineValid[i] < 0),
+              filling < 0,
+              fillSettle < 0,
+              memEnR < 0,
+              // If a refill read is still outstanding to the MMU (filling, or
+              // already draining a prior flush), keep draining until its stale
+              // completion arrives, unless it completes this very cycle.
+              drain < (filling | drain) & ~(memDone & memValid),
+            ],
+            orElse: [
+              fillSettle < 0,
               If(
-                memDone & memValid,
+                drain,
                 then: [
+                  // Waiting out the abandoned read. filling is 0 so its
+                  // completion is never written; just release once it lands.
+                  If(memDone & memValid, then: [drain < 0]),
+                ],
+                orElse: [
                   If(
-                    fillWord.eq(lastWord),
+                    filling,
                     then: [
-                      memEnR < 0,
-                      filling < 0,
-                      fillSettle < 1,
-                      ...List.generate(
-                        numLines,
-                        (l) => If(
-                          fillIdx.eq(l),
-                          then: [lineValid[l] < 1, lineTag[l] < fillTag],
-                        ),
+                      If(
+                        memDone & memValid,
+                        then: [
+                          If(
+                            fillWord.eq(lastWord),
+                            then: [
+                              memEnR < 0,
+                              filling < 0,
+                              fillSettle < 1,
+                              ...List.generate(
+                                numLines,
+                                (l) => If(
+                                  fillIdx.eq(l),
+                                  then: [
+                                    lineValid[l] < 1,
+                                    lineTag[l] < fillTag,
+                                  ],
+                                ),
+                              ),
+                            ],
+                            orElse: [
+                              fillWord < fillWord + 1,
+                              memAddrR <
+                                  (fillBase +
+                                      ((fillWord + 1).zeroExtend(xlen) *
+                                          Const(wordBytes, width: xlen))),
+                            ],
+                          ),
+                        ],
                       ),
                     ],
                     orElse: [
-                      fillWord < fillWord + 1,
-                      memAddrR <
-                          (fillBase +
-                              ((fillWord + 1).zeroExtend(xlen) *
-                                  Const(wordBytes, width: xlen))),
+                      If(
+                        wantFill,
+                        then: [
+                          filling < 1,
+                          fillIdx < idxOf(fillAddr),
+                          fillTag < tagOf(fillAddr),
+                          fillBase < fillLineBase,
+                          fillWord < 0,
+                          memEnR < 1,
+                          memAddrR < fillLineBase,
+                        ],
+                      ),
                     ],
                   ),
-                ],
-              ),
-            ],
-            orElse: [
-              If(
-                wantFill,
-                then: [
-                  filling < 1,
-                  fillIdx < idxOf(fillAddr),
-                  fillTag < tagOf(fillAddr),
-                  fillBase < fillLineBase,
-                  fillWord < 0,
-                  memEnR < 1,
-                  memAddrR < fillLineBase,
                 ],
               ),
             ],
@@ -490,6 +525,12 @@ class HarborL1DCache extends BridgeModule {
     // FSM state.
     final filling = Logic(name: 'filling');
     final fillSettle = Logic(name: 'fillSettle');
+    // Drain an abandoned in-flight memory op after a flush (fence.i) mid-fill/
+    // store/bypass: the MMU completes the read/write it already launched, so
+    // block a new op until that stale completion lands and is discarded. Without
+    // this, a post-flush fill captures the abandoned read as word 0 of the new
+    // line (the creek Weir->Ferrite handoff corruption). Mirrors [HarborL1ICache].
+    final drain = Logic(name: 'drain');
     final storing = Logic(name: 'storing');
     final storeDone = Logic(name: 'storeDone');
     // Uncached-read pass-through (MMIO / SRAM / flash): a single memory read
@@ -560,7 +601,7 @@ class HarborL1DCache extends BridgeModule {
     respData <= mux(bypassDone, bypassData, dataRam.readData(0) >> rdShift);
     respValid <= (loadHit | storeDone | bypassDone);
     miss <= loadMiss;
-    busy <= (filling | storing | bypassing);
+    busy <= (filling | storing | bypassing | drain);
 
     final fillWrEn = (filling & memDone & memValid).named('fillWrEn');
     final Logic fillEntry;
@@ -580,7 +621,7 @@ class HarborL1DCache extends BridgeModule {
     Sequential(clk, [
       addrQ < reqAddr,
       If(
-        reset | flush,
+        reset,
         then: [
           ...List.generate(numLines, (i) => lineValid[i] < 0),
           filling < 0,
@@ -591,122 +632,157 @@ class HarborL1DCache extends BridgeModule {
           bypassDone < 0,
           memEnR < 0,
           memWeR < 0,
+          drain < 0,
         ],
         orElse: [
-          fillSettle < 0,
-          storeDone < 0,
-          bypassDone < 0,
           If(
-            filling,
+            flush,
             then: [
-              If(
-                memDone & memValid,
-                then: [
-                  If(
-                    fillWord.eq(lastWord),
-                    then: [
-                      memEnR < 0,
-                      filling < 0,
-                      fillSettle < 1,
-                      ...List.generate(
-                        numLines,
-                        (l) => If(
-                          fillIdx.eq(l),
-                          then: [lineValid[l] < 1, lineTag[l] < fillTag],
-                        ),
-                      ),
-                    ],
-                    orElse: [
-                      fillWord < fillWord + 1,
-                      memAddrR <
-                          (fillBase +
-                              ((fillWord + 1).zeroExtend(xlen) *
-                                  Const(wordBytes, width: xlen))),
-                    ],
-                  ),
-                ],
-              ),
+              ...List.generate(numLines, (i) => lineValid[i] < 0),
+              filling < 0,
+              fillSettle < 0,
+              storing < 0,
+              storeDone < 0,
+              bypassing < 0,
+              bypassDone < 0,
+              memEnR < 0,
+              memWeR < 0,
+              // Any in-flight memory op (fill/store/bypass) was launched at the
+              // MMU and will still complete; drain that stale completion before a
+              // new op, unless it completes this very cycle.
+              drain < (filling | storing | bypassing | drain) & ~memDone,
             ],
             orElse: [
+              fillSettle < 0,
+              storeDone < 0,
+              bypassDone < 0,
               If(
-                storing,
+                drain,
                 then: [
-                  // Write-through in flight: wait for the memory ack, then drop
-                  // the resident line if the store landed on it.
-                  If(
-                    memDone,
-                    then: [
-                      memEnR < 0,
-                      memWeR < 0,
-                      storing < 0,
-                      storeDone < 1,
-                      ...List.generate(
-                        numLines,
-                        (l) => If(
-                          storeInv & storeIdx.eq(l),
-                          then: [lineValid[l] < 0],
-                        ),
-                      ),
-                    ],
-                  ),
+                  // Waiting out the abandoned op; discard its completion (filling
+                  // is 0 so nothing is written) and release.
+                  If(memDone, then: [drain < 0]),
                 ],
                 orElse: [
                   If(
-                    bypassing,
+                    filling,
                     then: [
-                      // Uncached read in flight: return the word, cache untouched.
                       If(
                         memDone & memValid,
                         then: [
-                          memEnR < 0,
-                          bypassing < 0,
-                          bypassDone < 1,
-                          bypassData < memRdata,
+                          If(
+                            fillWord.eq(lastWord),
+                            then: [
+                              memEnR < 0,
+                              filling < 0,
+                              fillSettle < 1,
+                              ...List.generate(
+                                numLines,
+                                (l) => If(
+                                  fillIdx.eq(l),
+                                  then: [
+                                    lineValid[l] < 1,
+                                    lineTag[l] < fillTag,
+                                  ],
+                                ),
+                              ),
+                            ],
+                            orElse: [
+                              fillWord < fillWord + 1,
+                              memAddrR <
+                                  (fillBase +
+                                      ((fillWord + 1).zeroExtend(xlen) *
+                                          Const(wordBytes, width: xlen))),
+                            ],
+                          ),
                         ],
                       ),
                     ],
                     orElse: [
-                      // Idle. Store (write-through) has priority, then a cacheable
-                      // load miss (fill), then an uncacheable load (bypass). The
-                      // core presents at most one of these per cycle. Gate the
-                      // store start on ~blockHit too, so the completion-cycle
-                      // block above also stops a store from re-issuing.
                       If(
-                        storeReq & ~blockHit,
+                        storing,
                         then: [
-                          storing < 1,
-                          memEnR < 1,
-                          memWeR < 1,
-                          memAddrR < reqAddr,
-                          memWdataR < reqData,
-                          memSizeR < reqSize,
-                          storeIdx < idxOf(reqAddr),
-                          storeInv <
-                              (committedHitOf(reqAddr) & cacheableOf(reqAddr)),
+                          // Write-through in flight: wait for the memory ack, then drop
+                          // the resident line if the store landed on it.
+                          If(
+                            memDone,
+                            then: [
+                              memEnR < 0,
+                              memWeR < 0,
+                              storing < 0,
+                              storeDone < 1,
+                              ...List.generate(
+                                numLines,
+                                (l) => If(
+                                  storeInv & storeIdx.eq(l),
+                                  then: [lineValid[l] < 0],
+                                ),
+                              ),
+                            ],
+                          ),
                         ],
                         orElse: [
                           If(
-                            loadMiss,
+                            bypassing,
                             then: [
-                              filling < 1,
-                              memEnR < 1,
-                              memWeR < 0,
-                              memSizeR < Const(2, width: 3),
-                              fillIdx < idxOf(addrQ),
-                              fillTag < tagOf(addrQ),
-                              fillBase < fillLineBase,
-                              fillWord < 0,
-                              memAddrR < fillLineBase,
+                              // Uncached read in flight: return the word, cache untouched.
+                              If(
+                                memDone & memValid,
+                                then: [
+                                  memEnR < 0,
+                                  bypassing < 0,
+                                  bypassDone < 1,
+                                  bypassData < memRdata,
+                                ],
+                              ),
                             ],
                             orElse: [
+                              // Idle. Store (write-through) has priority, then a cacheable
+                              // load miss (fill), then an uncacheable load (bypass). The
+                              // core presents at most one of these per cycle. Gate the
+                              // store start on ~blockHit too, so the completion-cycle
+                              // block above also stops a store from re-issuing.
                               If(
-                                loadBypass,
+                                storeReq & ~blockHit,
                                 then: [
-                                  bypassing < 1,
+                                  storing < 1,
                                   memEnR < 1,
-                                  memWeR < 0,
-                                  memSizeR < Const(2, width: 3),
-                                  memAddrR < addrQ,
+                                  memWeR < 1,
+                                  memAddrR < reqAddr,
+                                  memWdataR < reqData,
+                                  memSizeR < reqSize,
+                                  storeIdx < idxOf(reqAddr),
+                                  storeInv <
+                                      (committedHitOf(reqAddr) &
+                                          cacheableOf(reqAddr)),
+                                ],
+                                orElse: [
+                                  If(
+                                    loadMiss,
+                                    then: [
+                                      filling < 1,
+                                      memEnR < 1,
+                                      memWeR < 0,
+                                      memSizeR < Const(2, width: 3),
+                                      fillIdx < idxOf(addrQ),
+                                      fillTag < tagOf(addrQ),
+                                      fillBase < fillLineBase,
+                                      fillWord < 0,
+                                      memAddrR < fillLineBase,
+                                    ],
+                                    orElse: [
+                                      If(
+                                        loadBypass,
+                                        then: [
+                                          bypassing < 1,
+                                          memEnR < 1,
+                                          memWeR < 0,
+                                          memSizeR < Const(2, width: 3),
+                                          memAddrR < addrQ,
+                                        ],
+                                      ),
+                                    ],
+                                  ),
                                 ],
                               ),
                             ],

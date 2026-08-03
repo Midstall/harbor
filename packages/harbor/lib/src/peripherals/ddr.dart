@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:rohd/rohd.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 
@@ -256,6 +254,24 @@ class HarborDdrController extends BridgeModule
   /// single-shot write path, byte-identical.
   final bool writeVerify;
 
+  /// Opt-in hardware read-calibration (see [DdrSequencer.readLevel]). On the
+  /// ddr3Fast (openXC7 Arty) build the read eye is a per-boot unknown: the
+  /// CK-based ISERDESE2 capture window + per-lane IDELAY tap that frames the BL8
+  /// line drifts with temperature/voltage, so a static tap boots only ~half the
+  /// time (the Ferrite first-ifetch coin-flip). When set, the sequencer runs an
+  /// MPR-based read-calibration phase after init / before the bus opens: for
+  /// each byte lane it sweeps the read window x IDELAY tap, reads the DRAM's MPR
+  /// 0,FF,0,FF pattern back through the PHY per-lane match, and locks each lane
+  /// at its eye centre. The wishbone stays gated until [DdrSequencer.rdCalDone].
+  /// Xilinx ddr3Fast-only, ignored otherwise.
+  final bool readLevel;
+
+  /// Post-read-cal write-read/cadence self-test (see [DdrSequencer.selfTest]):
+  /// the bus opens only after the locked read point passes a varied-cadence
+  /// verify, killing the coin-flip where a point clean at the calibration spacing
+  /// still fails at the CPU's interleaved read cadence. Requires [readLevel].
+  final bool selfTest;
+
   /// Bounded retry budget for [writeVerify] (writes past this ack best-effort so
   /// a pathologically stuck word can never hang the bus). 15 is ample: the write
   /// slip is occasional and a retry re-drives the same word on DQ, so the second
@@ -334,6 +350,12 @@ class HarborDdrController extends BridgeModule
   /// Off (the default) keeps the proven 48 MHz DLL-off IDDR read path unchanged.
   final bool ddr3Fast;
 
+  /// Open the ddr3Fast read capture window from the DRAM's read strobe (DQS
+  /// captured as data on CK) instead of a fixed CL+readSlack tap. The fixed tap
+  /// mis-frames under the i+d read cadence; the strobe self-aligns each read.
+  /// Forwarded to [DdrPhyXilinx.dqsGatedRead]. Off = the fixed-tap path unchanged.
+  final bool dqsGatedRead;
+
   /// The ck333 DDR-CK frequency (MHz) the ddr3Fast tree runs at, feeds the PHY's
   /// MR DLL-on selection and IDELAYE2 REFCLK. Only used when [ddr3Fast].
   final double ddr3FastCkMhz;
@@ -379,6 +401,8 @@ class HarborDdrController extends BridgeModule
     this.mprDebug = false,
     this.trainableRead = false,
     this.writeLevel = false,
+    this.readLevel = false,
+    this.selfTest = false,
     this.writeVerify = false,
     this.writeVerifyTries = 15,
     this.writeTrimTrainable = false,
@@ -392,6 +416,7 @@ class HarborDdrController extends BridgeModule
     this.target,
     this.asyncClock = false,
     this.ddr3Fast = false,
+    this.dqsGatedRead = false,
     this.ddr3FastCkMhz = 333.333,
     this.ddr3FastIdelayRefMhz = 200.0,
     this.ddr3FastCl = 5,
@@ -727,11 +752,14 @@ class HarborDdrController extends BridgeModule
     // OSERDESE2 beat rotation) implement the WL actuator + feedback, so enable it
     // on either, the 48 MHz Xilinx IDDR path has no actuator so it is excluded.
     // The Xilinx ddr3Fast WL actuator+feedback is wired but its DRAM feedback
-    // capture is still under debug (fb_map reads flat 0), so PARK it behind the
-    // HARBOR_DDR_WL env (default off): the x8-on-lane0 bring-up runs on the proven
-    // static lane-0 write timing with NO WL. Set HARBOR_DDR_WL=1 to re-enable the
-    // WL debug. The ECP5 path keeps WL unconditionally (it works there).
-    final xilWlEnable = Platform.environment['HARBOR_DDR_WL'] == '1';
+    // capture is still under debug (fb_map reads flat 0). WL made no difference at
+    // 200MHz (static timing worked), but at rated CK the static write launch
+    // mis-lands and the write eye MUST be re-centred. This flag also gates the
+    // per-lane write-beat [pos] block, so it must be ON for the runtime write-beat
+    // OVERRIDE (reg14) that the FSBL sweeps to re-center the write launch WITHOUT
+    // relying on the (still-flat) WL feedback. Default pos=0 (WL not done) matches
+    // the old static dqBeat1=0 rotation, so 200MHz stays working.
+    const xilWlEnable = true;
     final useWriteLevel =
         writeLevel && (isEcp5Phy || (ddr3Fast && xilWlEnable)) && config.isDdr;
     final laneCount = config.dataWidth ~/ 8;
@@ -745,6 +773,32 @@ class HarborDdrController extends BridgeModule
     final chWlDone = Logic(name: 'ch_wl_done');
     // WL feedback witness bitmap (per-tap voted feedback, last lane) -> reg6.
     final chWlFbMap = Logic(name: 'ch_wl_fb_map', width: 8);
+
+    // Read-calibration channel (sequencer sRdCal FSM <-> ddr3Fast PHY).
+    // Forward-declared so the PHY builds against them; driven from the sequencer
+    // below. Only meaningful when [readLevel] is set on the ddr3Fast build, tied
+    // off otherwise. The bus-face FSM keeps the wishbone gated until
+    // [chRdCalDone] so the CPU's first read/ifetch only ever sees a calibrated
+    // eye (kills the Ferrite first-ifetch coin-flip).
+    final useReadLevel = readLevel && ddr3Fast && config.isDdr;
+    // The self-test rides on read-cal (it re-uses the MPR + locked window/tap).
+    final useSelfTest = selfTest && useReadLevel;
+    final chRdCalActive = Logic(name: 'ch_rd_cal_active');
+    final chRdCalIdelayLd = Logic(name: 'ch_rd_cal_idelay_ld');
+    final chRdCalTap = Logic(name: 'ch_rd_cal_tap', width: 5);
+    final chRdCalLane = Logic(name: 'ch_rd_cal_lane', width: laneSelW);
+    final chRdCalWindow = Logic(name: 'ch_rd_cal_window', width: 4);
+    final chRdCalBitslip = Logic(name: 'ch_rd_cal_bitslip');
+    final chRdCalDone = Logic(name: 'ch_rd_cal_done');
+    // PHY -> sequencer per-lane MPR match (the read-eye witness).
+    final chRdCalMatch = Logic(name: 'ch_rd_cal_match', width: laneCount);
+    // Read-cal observability word (seq -> STATUS reg6). Forward-declared; driven
+    // (bus-synced) from seq.rdCalDbg after the sequencer is built. On the
+    // readLevel build reg6 (unused WL-RESULT, creek has no WL) reports the held
+    // read-cal outcome so a boot that survives (via the watchdog) exposes where
+    // read-cal stopped: [15]done [14]reached [13]watchdog-fired [12]eye-found
+    // [11:7]tap [6:3]window [2:0]sub-state.
+    final chRdCalDbg = Logic(name: 'ch_rd_cal_dbg', width: 16);
 
     // Firmware write-DQS-delay channel (reg7 WRDLY <-> PHY). The firmware sweeps
     // the write pointer directly via reg7 and finds the write alignment by reading
@@ -966,6 +1020,11 @@ class HarborDdrController extends BridgeModule
     // ctrl83 stage the BL8-line capture opens on, so firmware sweeps the coarse
     // "which controller cycle" knob without a rebuild (reg12 @ +0x60).
     Logic? xilWindowTap;
+    // Firmware write-beat override (reg14 @ +0x70): the runtime write-DQS re-center
+    // knob for the Xilinx PHY (per-lane write-beat rotation + enable). Quasi-static
+    // level, passed to the PHY like [xilWindowTap].
+    Logic? xilWrBeatOvr;
+    Logic? xilWrBeatOvrEn;
     // Firmware-programmable refresh level (reg13 @ +0x68), bus domain, synced to
     // the sequencer's tempLevel below to scale dynamic tREFI (0=1x/1=2x/2=4x). The
     // openXC7 toolchain has no XADC Bel, so temperature adaptation is done in
@@ -1248,7 +1307,13 @@ class HarborDdrController extends BridgeModule
                 wrCtl, // reg5 read = WRCTL diagnostics (write side is RDPCTL)
                 mux(
                   regSel.eq(Const(6, width: 4)),
-                  wlResult,
+                  // reg6: WL-RESULT normally; on the readLevel build the read-cal
+                  // word; on a dqsGatedRead build the raw DQS capture (dbg_beats),
+                  // so firmware can read the strobe on the TRAINABLE path (reg7 is
+                  // WRDLY there, so the base-path chBeats readout is unreachable).
+                  dqsGatedRead
+                      ? chBeats.zeroExtend(32)
+                      : (useReadLevel ? chRdCalDbg.zeroExtend(32) : wlResult),
                   mux(
                     regSel.eq(Const(7, width: 4)),
                     wrDlyReg.zeroExtend(32), // reg7 WRDLY reads back the tap
@@ -1358,6 +1423,8 @@ class HarborDdrController extends BridgeModule
       xilBitslipLane = xrt.bitslipLane;
       xilWindowTap = xrt.windowTap;
       xilRefreshLevel = xrt.refl;
+      xilWrBeatOvr = xrt.wrBeatOvr;
+      xilWrBeatOvrEn = xrt.wrBeatOvrEn;
 
       // Read-back: reg2 returns the latched slack, reg3 STATUS returns
       // diagnostics: bit0 = IDELAYCTRL RDY (the calibration smoking gun),
@@ -1435,17 +1502,13 @@ class HarborDdrController extends BridgeModule
         // the tree clocks (ck333/ck333@90/200 MHz idelayref) are fed straight
         // from the controller's ddr3Fast input ports, [dpClk] is ctrl83.
         ddr3Fast: ddr3Fast,
+        dqsGatedRead: dqsGatedRead,
         ckFast: ddr3Fast ? input('ddr_ck_fast') : null,
         ck90Fast: ddr3Fast ? input('ddr_ck90_fast') : null,
-        // A dedicated 180-deg DQS launch clock is a 4th global clock into the
-        // IO region, the HW-proven UberDDR3 openXC7 PHY instead launches DQS on
-        // !CK (combinational invert) and routes only 3 IO clocks. Dropping it
-        // (PHY falls back to ckFast) matches that clock budget. Env-gated while
-        // bringing the Arty DDR clock network up on openXC7.
-        ckDqsFast:
-            (ddr3Fast && Platform.environment['HARBOR_DDR_NO_DQSCLK'] != '1')
-            ? input('ddr_ck_dqs_fast')
-            : null,
+        // A dedicated 180-deg DQS launch clock (a 4th global clock into the IO
+        // region). The alternative UberDDR3 openXC7 PHY launches DQS on !CK and
+        // routes only 3 IO clocks; harbor keeps the dedicated clock.
+        ckDqsFast: ddr3Fast ? input('ddr_ck_dqs_fast') : null,
         idelayRef: ddr3Fast ? input('ddr_idelay_ref') : null,
         idelayRefFastMhz: ddr3FastIdelayRefMhz,
         // ddr3Fast: the PHY owns the DQ/DQS pads so the write OSERDESE2 in-site
@@ -1480,6 +1543,18 @@ class HarborDdrController extends BridgeModule
         wlLane: useWriteLevel ? chWlLane : null,
         wlTrained: useWriteLevel ? chWlTrained : null,
         wlDone: useWriteLevel ? chWlDone : null,
+        wlPosOvr: useWriteLevel ? xilWrBeatOvr : null,
+        wlPosOvrEn: useWriteLevel ? xilWrBeatOvrEn : null,
+        // Read-calibration (ddr3Fast only): the PHY takes its per-lane IDELAY
+        // tap / bitslip / read window from the sequencer's sRdCal FSM while
+        // rd_cal_active and reports per-lane MPR match on rd_cal_match (read
+        // below). Tied off unless [useReadLevel].
+        rdCalActive: useReadLevel ? chRdCalActive : null,
+        rdCalIdelayLd: useReadLevel ? chRdCalIdelayLd : null,
+        rdCalTap: useReadLevel ? chRdCalTap : null,
+        rdCalLane: useReadLevel ? chRdCalLane : null,
+        rdCalWindow: useReadLevel ? chRdCalWindow : null,
+        rdCalBitslip: useReadLevel ? chRdCalBitslip : null,
         // The MMCM works on openXC7 too (BUFG feedback + ZHOLD, see
         // XilinxMmcme2Adv / clock_domain), so the PHY uses the real 90-degree
         // MMCM write-launch clock on every Xilinx target.
@@ -1868,6 +1943,14 @@ class HarborDdrController extends BridgeModule
     createPort('dbg_cdc', PortDirection.output, width: 8);
     output('dbg_cdc') <= dbgCdc;
 
+    // LA probe bundle (Pmod capture, bus-independent): [3:0]=sequencer stateCode,
+    // [4]=rd_cal_active, [5]=phy read-valid. Lets a logic analyzer watch the
+    // read-cal FSM + read completion live even when the wishbone is wedged (the
+    // failure mode of the readLevel build). Always created so genip's exposePin
+    // is not the conditional-port variant that silently no-ops; driven from the
+    // sequencer/PHY below (forward-declared here).
+    createPort('dbg_la', PortDirection.output, width: 6);
+
     final dvStb = Logic(name: 'dv_stb');
     final dvWe = Logic(name: 'dv_we');
     final dvAddr = Logic(name: 'dv_addr', width: nbAddr.width);
@@ -2032,6 +2115,12 @@ class HarborDdrController extends BridgeModule
       cwl: ddr3Fast ? ddr3FastCwl : 6,
       mprDebug: mprDebug,
       writeLevel: useWriteLevel,
+      // Read-calibration: the sRdCal FSM sweeps each lane's read window x IDELAY
+      // tap against the PHY's per-lane MPR match and locks the eye centre before
+      // the bus opens. rd_cal_match is the PHY witness, null off the build.
+      readLevel: useReadLevel,
+      selfTest: useSelfTest,
+      rdCalMatch: useReadLevel ? chRdCalMatch : null,
     );
 
     // Drive the PHY command/data channel from the sequencer (closes the cycle
@@ -2098,6 +2187,32 @@ class HarborDdrController extends BridgeModule
       chWlDone <= Const(1);
       chWlFbMap <= Const(0, width: 8);
     }
+    // Read-calibration channel: route the sequencer's sRdCal actuators to the
+    // ddr3Fast PHY and the PHY's per-lane MPR match back to the sequencer. Off
+    // the build both sides were built with null ports, so tie the channel logics
+    // to benign defaults (done=1 opens the bus, match=0, actuators idle).
+    if (useReadLevel) {
+      chRdCalActive <= seq.rdCalActive;
+      chRdCalIdelayLd <= seq.rdCalIdelayLd;
+      chRdCalTap <= seq.rdCalTap;
+      chRdCalLane <= seq.rdCalLane;
+      chRdCalWindow <= seq.rdCalWindow;
+      chRdCalBitslip <= seq.rdCalBitslip;
+      chRdCalDone <= seq.rdCalDone;
+      chRdCalMatch <= (phy as DdrPhyXilinx).output('rd_cal_match');
+      // Bus-synced observability word into reg6 (quasi-static after read-cal).
+      chRdCalDbg <= statusToBus(seq.rdCalDbg, 'st_rdcaldbg', width: 16);
+    } else {
+      chRdCalActive <= Const(0);
+      chRdCalIdelayLd <= Const(0);
+      chRdCalTap <= Const(0, width: 5);
+      chRdCalLane <= Const(0, width: laneSelW);
+      chRdCalWindow <= Const(0, width: 4);
+      chRdCalBitslip <= Const(0);
+      chRdCalDone <= Const(1);
+      chRdCalMatch <= Const(0, width: laneCount);
+      chRdCalDbg <= Const(0, width: 16);
+    }
     // Firmware WRDLY channel: driven from the sclk-synced reg7 in PART B when
     // [useWrDly], tied off otherwise so the nets stay driven (the PHY was built
     // with null WRDLY ports off the trainable build).
@@ -2149,6 +2264,13 @@ class HarborDdrController extends BridgeModule
     final gotRd = Logic(name: 'got_rd');
     final doneSeen = Logic(name: 'done_seen');
     final opDone = (busy & (seq.busDone | doneSeen)).named('op_done');
+    // LA probe (Pmod, bus-independent): the calibration + self-test progress.
+    // [3:0]=sequencer stateCode, [4]=rd_cal_active, [5]=self_test_pass. Maps to
+    // ch0/1/2/3/5/7. Lets a logic analyzer watch the read-cal sweep -> self-test
+    // verify -> bus-open sequence live. dbg_beats/dbg_probe only exist on the
+    // ddr3Fast PHY, so the raw read-capture probe rides that build only.
+    output('dbg_la') <=
+        [seq.selfTestPassOut, seq.rdCalActive, seq.stateCode].swizzle();
 
     Sequential(seqClk, reset: seqReset, [
       dvAck < 0,
@@ -2157,7 +2279,11 @@ class HarborDdrController extends BridgeModule
       // ~ack keeps the ack-cycle strobe overhang from re-latching the same
       // request: the master drops stb only after it has sampled the ack.
       If(
-        ~busy & ~dvAck & dvStb,
+        // Gate on read-cal done: the bus stays closed (busy held low) until the
+        // sRdCal sweep has locked every lane's read eye, so the CPU's first
+        // read/ifetch only ever lands on a calibrated capture. Tied to 1 off the
+        // readLevel build, so this is a no-op there.
+        ~busy & ~dvAck & dvStb & chRdCalDone,
         then: [
           busy < 1,
           req < 1,
@@ -2305,113 +2431,6 @@ class HarborDdrController extends BridgeModule
         final dqsNPad = inOut('sdram_dqs_n');
         final dqsNDrive = TriStateBuffer(phy.dqsNOut, enable: phy.dqsOe);
         dqsNPad <= dqsNDrive.out;
-      }
-      // DDR bring-up logic-analyzer probe (env HARBOR_DDR_LA=1). A 12-bit bundle
-      // of fabric nets (NO ODDR Q pad outputs, those fault nextpnr) fanned to
-      // Pmod pins by genip so the LA can watch the DDR datapath during a
-      // write-then-read and decouple write vs read vs address:
-      //   [11:7] phy.dbg_probe = {rdActive,wrActive,windowOpen,beatHit,dqRise[0]}
-      //   [6] dq_in[0]  (DRAM->FPGA read data)   [5] dqs_in[0] (read strobe)
-      //   [4] dq_oe     (FPGA drives DQ = write) [3] cs_n      (command issued)
-      //   [2] cmd[0]=WE (read vs write)          [1] addr[0]   [0] ba[0]
-      if (Platform.environment['HARBOR_DDR_LA'] == '1' && config.isDdr) {
-        createPort('dbg_la', PortDirection.output, width: 12);
-        if (Platform.environment['HARBOR_DDR_LA_INIT'] == '1') {
-          // INIT-WATCH bundle: see the JEDEC init sequence LIVE on the LA,
-          // bypassing the (suspect, constant-0x20) STATUS-bus readout. A
-          // heartbeat placed on seqClk INSIDE this controller proves the
-          // sequencer clock actually toggles in the FSM's region, state_code
-          // shows whether the FSM advances past sCkeWait, cke/reset_n/cs_n show
-          // the DRAM command bus fire.
-          final seqHb = Logic(name: 'ddr_seq_hb', width: 8);
-          Sequential(seqClk, [seqHb < seqHb + 1]);
-          output('dbg_la') <=
-              [
-                seqHb[4], // [11] seqClk heartbeat (clock alive AT the sequencer?)
-                seq.initDone, // [10] init/calibration complete
-                seq.stateCode, // [9:6] FSM state code (advances past 2=sCkeWait?)
-                seq.cke, // [5] CKE to DRAM
-                seq.resetN, // [4] DRAM reset_n (released?)
-                chCsN, // [3] command issued (low)
-                chCmd[0], // [2] cmd bit
-                chBa[0], // [1]
-                chAddr[0], // [0]
-              ].swizzle();
-        } else {
-          output('dbg_la') <=
-              [
-                phy.output('dbg_probe'),
-                dqIn[0],
-                dqsIn[0],
-                phy.dqOe,
-                chCsN,
-                chCmd[0],
-                chAddr[0],
-                chBa[0],
-              ].swizzle();
-        }
-      }
-    }
-
-    // ddr3Fast (Arty Xilinx) LA init-watch: the dbg_la block above lives inside
-    // the !ddr3Fast branch (there the fabric owns the tristate, on ddr3Fast the
-    // PHY owns the pads), so it NEVER runs on the Arty path. Recreate the
-    // init-watch bundle here so the LA can watch the JEDEC init live, bypassing
-    // the suspect STATUS-bus readout.
-    if (Platform.environment['HARBOR_DDR_LA'] == '1' &&
-        Platform.environment['HARBOR_DDR_LA_INIT'] == '1' &&
-        config.isDdr &&
-        ddr3Fast) {
-      createPort('dbg_la', PortDirection.output, width: 12);
-      // SELF-DECODING init-watch bundle. The physical probe->channel order on the
-      // LA is unknown, so three heartbeat taps at DISTINCT, widely-spaced divisors
-      // (seqClk = 100 MHz -> 0.39 / 1.56 / 6.25 MHz) act as frequency ANCHORS: the
-      // capture's per-channel transition counts identify exactly which channels
-      // carry [11]/[10]/[9], and the Const 1/0 markers at [1]/[0] cross-check
-      // polarity. Once the three anchors are located the whole permutation is
-      // pinned, so seq.stateCode[3:0] and seq.initDone can be read off
-      // UNAMBIGUOUSLY, settling the LA-vs-STATUS (sIdle vs sCkeWait) contradiction
-      // without trusting any probe-order assumption.
-      final seqHb = Logic(name: 'ddr_seq_hb', width: 8);
-      Sequential(seqClk, [seqHb < seqHb + 1]);
-      if (Platform.environment['HARBOR_DDR_LA_WR'] == '1') {
-        // WRITE-TIMING bundle: the PHY dbg_wr ctrl100 markers (launch / DQ-burst /
-        // DQS-burst / OE / pre+postambles) + the write command, with one heartbeat
-        // anchor for the probe-order/timebase. Run under DDRTEST_HAMMER (constant
-        // write bursts) so these pulse densely on the LA: the DQS-burst vs DQ-burst
-        // alignment (the write-latch question) is read directly off the trace.
-        final dbgWr = phy.output('dbg_wr'); // [7..0], see ddr_phy_xilinx
-        output('dbg_la') <=
-            [
-              seqHb[3], // [11] ANCHOR seqClk/16 = 6.25 MHz (timebase)
-              dbgWr[7], // [10] write LAUNCH pulse (cycle N)
-              dbgWr[6], // [9]  DQ serialize burst (N+1)
-              dbgWr[5], // [8]  DQ postamble (N+2)
-              dbgWr[4], // [7]  DQS preamble
-              dbgWr[3], // [6]  DQS burst cycle
-              dbgWr[2], // [5]  DQS postamble
-              dbgWr[1], // [4]  pad OE window (driven)
-              dbgWr[0], // [3]  write-active envelope
-              seq.csN, // [2] command strobe (low = command)
-              seq.wrStart, // [1] write-start pulse
-              seq.cmd[0], // [0] cmd bit0 (WE)
-            ].swizzle();
-      } else {
-        output('dbg_la') <=
-            [
-              seqHb[7], // [11] ANCHOR-SLOW  seqClk/256 = 0.39 MHz
-              seqHb[5], // [10] ANCHOR-MED   seqClk/64  = 1.56 MHz
-              seqHb[3], // [9]  ANCHOR-FAST  seqClk/16  = 6.25 MHz
-              seq.initDone, // [8] init/calibration complete
-              seq.stateCode[3], // [7] FSM state code bit3
-              seq.stateCode[2], // [6] FSM state code bit2
-              seq.stateCode[1], // [5] FSM state code bit1
-              seq.stateCode[0], // [4] FSM state code bit0
-              seq.csN, // [3] command issued (low)
-              seq.cke, // [2] CKE to DRAM
-              Const(1), // [1] STATIC-HIGH marker (polarity + map cross-check)
-              Const(0), // [0] STATIC-LOW marker
-            ].swizzle();
       }
     }
   }

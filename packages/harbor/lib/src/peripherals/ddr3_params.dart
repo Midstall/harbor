@@ -1,0 +1,135 @@
+/// Parameters for the DDR3 controller, faithful to the UberDDR3 parameter set.
+///
+/// The controller and PHY are Xilinx 7-series generic (Artix-7, Kintex-7,
+/// Spartan-7, Zynq-7); [odelaySupported] is the only bank-specific knob (HP banks
+/// have ODELAYE2 for the write path, HR banks use the CK@90 launch instead). The
+/// geometry defaults target the Micron MT41K128M16 (256 MB, x16) as fitted on the
+/// Digilent Arty S7.
+///
+/// Notably absent are the bench-sweep tuning knobs the old harbor PHY carried
+/// (cmdSlot, wrShift, wrBeat, window, readTaps, readSlack, readRetry, ...): the
+/// UberDDR3 calibration engine finds the read/write timing at run time, so there
+/// is nothing to hand-tune.
+library;
+
+class DdrParams {
+  /// Controller-interface clock period in picoseconds. Must be [serdesRatio]
+  /// times [ddr3ClkPeriodPs] (a 4:1 SERDES ratio for a real-speed DDR3 PHY).
+  final int controllerClkPeriodPs;
+
+  /// DDR3 device clock (CK) period in picoseconds (e.g. 3000 = 333.3 MHz,
+  /// 3333 = 300 MHz).
+  final int ddr3ClkPeriodPs;
+
+  /// Row-address width. MT41K128M16 = 14.
+  final int rowBits;
+
+  /// Column-address width. MT41K128M16 = 10.
+  final int colBits;
+
+  /// Bank-address width. DDR3 = 3 (8 banks).
+  final int baBits;
+
+  /// DQ bits per byte lane. Always 8 for DDR3.
+  final int dqBits;
+
+  /// Byte lanes: 1 = x8, 2 = x16. The Arty S7 populates a x16 device, so 2
+  /// (the full 256 MB).
+  final int lanes;
+
+  /// Write path selection: HP-bank ODELAYE2 deskew (true) vs HR-bank CK@90
+  /// launch (false). Spartan-7 and Artix-7 HR banks = false.
+  final bool odelaySupported;
+
+  /// Emit the low-power idle sequence between bursts (UberDDR3 OPT_LOWPOWER).
+  final bool optLowPower;
+
+  /// Honour i_wb_cyc dropping mid-transaction as an abort (UberDDR3 OPT_BUS_ABORT).
+  final bool optBusAbort;
+
+  /// Exercise the data-mask (per-byte write) path during calibration.
+  final bool testDatamask;
+
+  /// Run the built-in self test (burst / random / alternating write-read across
+  /// the address space) before the wishbone bus is opened. Reaching
+  /// DONE_CALIBRATE then means the memory has been proven read/write-clean.
+  final bool bistMode;
+
+  /// DDR3 speed bin selecting the JEDEC AC timings: 0 = use top-level overrides,
+  /// 1 = DDR3-1066 (7-7-7), 2 = DDR3-1333 (9-9-9), 3 = DDR3-1600 (11-11-11).
+  final int speedBin;
+
+  /// Side-band ECC (0 = off). Kept for parity with UberDDR3; unused on the Arty S7.
+  final bool eccEnable;
+
+  /// Dual-rank DIMM support (adds a rank address bit). Single-rank device = false.
+  final bool dualRankDimm;
+
+  const DdrParams({
+    required this.controllerClkPeriodPs,
+    required this.ddr3ClkPeriodPs,
+    this.rowBits = 14,
+    this.colBits = 10,
+    this.baBits = 3,
+    this.dqBits = 8,
+    this.lanes = 2,
+    this.odelaySupported = false,
+    this.optLowPower = true,
+    this.optBusAbort = true,
+    this.testDatamask = true,
+    this.bistMode = true,
+    this.speedBin = 1,
+    this.eccEnable = false,
+    this.dualRankDimm = false,
+  }) : assert(dqBits == 8, 'DDR3 DQ is 8 bits per lane'),
+       assert(lanes == 1 || lanes == 2, 'x8 (1) or x16 (2)');
+
+  /// Digilent Arty S7: Micron MT41K128M16, x16, 256 MB, HR I/O bank. [ckPeriodPs]
+  /// sets the DDR CK (3000 = 333 MHz, 3333 = 300 MHz); the controller clock is
+  /// four times slower (the 4:1 SERDES ratio).
+  factory DdrParams.artyS7({int ckPeriodPs = 3000}) => DdrParams(
+    ddr3ClkPeriodPs: ckPeriodPs,
+    controllerClkPeriodPs: ckPeriodPs * 4,
+    rowBits: 14,
+    colBits: 10,
+    baBits: 3,
+    dqBits: 8,
+    lanes: 2,
+    odelaySupported: false,
+    speedBin: 1,
+  );
+
+  // --- derived geometry (mirrors the UberDDR3 localparams) ---
+
+  /// SERDES ratio = controller period / CK period (4 for a 4:1 real-speed PHY).
+  int get serdesRatio => controllerClkPeriodPs ~/ ddr3ClkPeriodPs;
+
+  /// Burst-addressable {row, bank, col} address, minus the bits a single
+  /// wishbone word already spans across the SERDES burst.
+  int get wbAddrBits =>
+      rowBits +
+      colBits +
+      baBits -
+      _clog2(serdesRatio * 2) +
+      (dualRankDimm ? 1 : 0);
+
+  /// Wishbone data width: one BL8 burst gathered across the SERDES ratio, both
+  /// lanes. x16 @ 4:1 = 8*2*4*2 = 128 bits.
+  int get wbDataBits => dqBits * lanes * serdesRatio * 2;
+
+  /// Wishbone byte-select width.
+  int get wbSelBits => wbDataBits ~/ 8;
+
+  /// Total addressable capacity in bytes (x16 = 256 MB).
+  int get sizeBytes => (1 << wbAddrBits) * wbSelBits;
+
+  static int _clog2(int x) {
+    var n = 0;
+    var v = x - 1;
+    while (v > 0) {
+      v >>= 1;
+      n++;
+    }
+    return n;
+  }
+}

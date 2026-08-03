@@ -188,29 +188,19 @@ void main() {
       reason: 'lane 1 trained tap should be the feedback 0->1 transition tap',
     );
 
-    // WITNESS bitmap: reg6-exported per-tap voted feedback for the LAST lane
-    // scanned (lane 1, target tap 5). The feedback model drives 1 at taps >= 5,
-    // so the map records low at taps 0..4 and high at taps 5..7 (a clean
-    // 0..01..1 ramp). This is the exact evidence the FSBL reads to distinguish a
-    // real WL edge (this ramp) from an RTL feedback-path fault (all-0 / all-1).
+    // WITNESS bitmap wl_fb_map = {bit7 = wlFbEver (feedback ever read high in
+    // the whole scan), bits[6:0] = the ticks-1..7 feedback-arrival WAVEFORM,
+    // OR-accumulated across the sweep}. A real WL edge means feedback was seen
+    // high somewhere in the scan (wlFbEver set). An ALL-ZERO map means the
+    // feedback path never flipped (an RTL fault the FSBL must detect).
     final fbMap = bit(seq.wlFbMap);
     expect(fbMap, isNotNull, reason: 'wl_fb_map is X after WL');
-    // The FSM STOPS the lane sweep the moment it latches the 0->1 edge, so the
-    // witness map records taps 0..transition: bits 0..4 low, bit 5 (the
-    // transition tap) high. The FSBL uses exactly this shape: a map that is
-    // NON-ZERO with its highest set bit == the trained tap means the WL edge is
-    // real. An ALL-ZERO map means the feedback never flipped (RTL fault).
     expect(
-      fbMap! & 0x1F,
-      0,
-      reason: 'witness map: feedback must read low below the transition tap',
-    );
-    expect(
-      (fbMap >> 5) & 0x1,
+      (fbMap! >> 7) & 0x1,
       0x1,
       reason:
-          'witness map: feedback must read high at the transition tap (the '
-          '0->1 edge the FSBL uses to confirm the WL edge exists)',
+          'witness map bit7 (wlFbEver) must be set: feedback was seen high '
+          'during the scan (a real WL edge / live feedback path)',
     );
     expect(
       fbMap,

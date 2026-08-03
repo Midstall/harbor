@@ -283,7 +283,17 @@ class RiscVTrapOp extends RiscVMicroOp {
   final int causeCode;
   final bool isInterrupt;
 
-  const RiscVTrapOp(this.causeCode, {this.isInterrupt = false});
+  /// When set, the core re-encodes the cause from the originating privilege
+  /// mode at trap time instead of using [causeCode] verbatim: ECALL becomes
+  /// U/VU=8, HS=9, VS=10, M=11. A trap whose cause does not depend on mode
+  /// leaves this false and keeps [causeCode].
+  final bool modeCause;
+
+  const RiscVTrapOp(
+    this.causeCode, {
+    this.isInterrupt = false,
+    this.modeCause = false,
+  });
 }
 
 /// Return from exception handler (MRET, SRET, URET).

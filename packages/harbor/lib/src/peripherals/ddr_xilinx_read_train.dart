@@ -42,6 +42,8 @@ class XilinxReadTrainRegs extends Module {
   Logic get bitslipLane => output('bitslip_lane');
   Logic get windowTap => output('window_tap');
   Logic get refl => output('refresh_level');
+  Logic get wrBeatOvr => output('wr_beat_ovr');
+  Logic get wrBeatOvrEn => output('wr_beat_ovr_en');
 
   XilinxReadTrainRegs(
     Logic clk,
@@ -56,7 +58,10 @@ class XilinxReadTrainRegs extends Module {
     int windowTapReset = 2,
     super.name = 'xil_rdtrain',
   }) {
-    final laneW = dataBits <= 1 ? 1 : (dataBits - 1).bitLength;
+    // Wide enough to address DQ bits 0..dataBits-1 AND the dqsGatedRead DQS-IDELAY
+    // sentinel lane = dataBits (one past the last DQ bit). (dataBits-1).bitLength
+    // alone leaves no room for the sentinel when dataBits is a power of two.
+    final laneW = dataBits <= 1 ? 1 : dataBits.bitLength;
     clk = addInput('clk', clk);
     reset = addInput('reset', reset);
     regSel = addInput('reg_sel', regSel, width: 4);
@@ -77,6 +82,12 @@ class XilinxReadTrainRegs extends Module {
     // can retune it (down when cool for bandwidth). The openXC7 toolchain has no
     // XADC Bel, so the die-temperature source is firmware, not the on-die sensor.
     final refl = addOutput('refresh_level', width: 2);
+    // reg14 WRITE-BEAT OVERRIDE (@ +0x70): [7:0] per-lane 4-bit write-beat taps
+    // (lane0 [3:0], lane1 [7:4]), [8] enable. The FSBL sweeps this to re-center
+    // the Xilinx write-DQS launch at runtime (no rebuild), independent of the WL
+    // FSM. Held level; resets to 0 (override disabled = the WL-trained tap wins).
+    final wrBeatOvr = addOutput('wr_beat_ovr', width: 8);
+    final wrBeatOvrEn = addOutput('wr_beat_ovr_en');
 
     final ldReg = Logic(name: 'ld_reg');
     final cntReg = Logic(name: 'cnt_reg', width: 5);
@@ -88,6 +99,9 @@ class XilinxReadTrainRegs extends Module {
     final wtapReg = Logic(name: 'wtap_reg', width: 4);
     // Refresh-level LEVEL register (reg13), resets to 2 (4x, safe).
     final reflReg = Logic(name: 'refl_reg', width: 2);
+    // Write-beat override LEVEL registers (reg14), reset to 0 (disabled).
+    final wrBeatOvrReg = Logic(name: 'wr_beat_ovr_reg', width: 8);
+    final wrBeatOvrEnReg = Logic(name: 'wr_beat_ovr_en_reg');
 
     Sequential(
       clk,
@@ -113,7 +127,10 @@ class XilinxReadTrainRegs extends Module {
                 If(ctrlWriteEdge & wData[5], then: [ldReg < 1]),
               ]),
               CaseItem(Const(11, width: 4), [
-                blaneReg < wData.slice(laneW - 1, 0),
+                // reg11: [3:0] lane, [4] slip. The lane field is a FIXED 4-bit
+                // slice beneath the slip bit, NOT laneW-derived: a wider laneW
+                // (needed by reg10's sentinel) must not swallow bit [4] here.
+                blaneReg < wData.slice(3, 0).zeroExtend(laneW),
                 If(ctrlWriteEdge & wData[4], then: [slipReg < 1]),
               ]),
               CaseItem(Const(12, width: 4), [
@@ -123,6 +140,11 @@ class XilinxReadTrainRegs extends Module {
               CaseItem(Const(13, width: 4), [
                 // reg13 REFRESH LEVEL: [1:0] = refresh-rate shift (held level).
                 reflReg < wData.slice(1, 0),
+              ]),
+              CaseItem(Const(14, width: 4), [
+                // reg14 WRITE-BEAT OVERRIDE: [7:0] per-lane taps, [8] enable.
+                wrBeatOvrReg < wData.slice(7, 0),
+                wrBeatOvrEnReg < wData[8],
               ]),
             ]),
           ],
@@ -137,5 +159,7 @@ class XilinxReadTrainRegs extends Module {
     blane <= blaneReg;
     wtap <= wtapReg;
     refl <= reflReg;
+    wrBeatOvr <= wrBeatOvrReg;
+    wrBeatOvrEn <= wrBeatOvrEnReg;
   }
 }

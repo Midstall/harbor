@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:rohd/rohd.dart';
 import 'package:rohd_bridge/rohd_bridge.dart';
 
@@ -668,18 +666,7 @@ class HarborClockGenerator {
       // matching the CLKOP convention. Leaving it at the default 0 produces a
       // degenerate CLKOS edge so the secondary domain's flops never clock and
       // that whole domain is dead: the cause of the silent single-PLL bring-up.
-      // TEMP PHASE-SWEEP: HARBOR_CLKOS_CPHASE overrides the secondary (core/sys)
-      // clock phase in VCO steps (0..CLKOS_DIV-1) to tune the mesochronous
-      // core<->sclk crossing off a bad phase (#144). Wrapped into range, the
-      // degenerate 0 is bumped to 1. Default stays CLKOS_DIV/2.
-      clkosCphase: (() {
-        final ov = int.tryParse(
-          Platform.environment['HARBOR_CLKOS_CPHASE'] ?? '',
-        );
-        if (ov == null) return clkosDiv ~/ 2;
-        final w = ((ov % clkosDiv) + clkosDiv) % clkosDiv;
-        return w == 0 ? 1 : w;
-      })(),
+      clkosCphase: clkosDiv ~/ 2,
       name: '${config.name}_pll',
     );
     feedback <= pll.output('CLKOP');

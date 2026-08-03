@@ -23,6 +23,32 @@ enum HarborSpiFlashMode {
 }
 
 /// SPI flash configuration.
+/// A flash partition for the device-tree `fixed-partitions` map (also the Linux
+/// MTD binding). genip populates these per target: an FPGA target prepends an
+/// `fpga-bitstream` partition at offset 0; every target has `river-fsbl` and
+/// `river-firmware`.
+class HarborFlashPartition {
+  /// Partition label (e.g. `fpga-bitstream`, `river-fsbl`, `river-firmware`).
+  final String label;
+
+  /// Byte offset within the flash.
+  final int offset;
+
+  /// Byte size of the partition.
+  final int size;
+
+  const HarborFlashPartition({
+    required this.label,
+    required this.offset,
+    required this.size,
+  });
+
+  @override
+  String toString() =>
+      'HarborFlashPartition($label @ 0x${offset.toRadixString(16)} '
+      '(0x${size.toRadixString(16)}))';
+}
+
 class HarborSpiFlashConfig with HarborPrettyString {
   /// HarborFlash size in bytes.
   final int size;
@@ -55,6 +81,10 @@ class HarborSpiFlashConfig with HarborPrettyString {
   /// for sequential reads since the per-word cmd/addr/dummy overhead dominates.
   final int readAheadWords;
 
+  /// Flash partition map emitted as a DT `fixed-partitions` node (empty = none).
+  /// genip computes this from the target (see [HarborFlashPartition]).
+  final List<HarborFlashPartition> partitions;
+
   const HarborSpiFlashConfig({
     required this.size,
     this.spiFrequency = 25000000,
@@ -65,6 +95,7 @@ class HarborSpiFlashConfig with HarborPrettyString {
     this.addressBytes = 3,
     this.dummyCycles = 0,
     this.readAheadWords = 1,
+    this.partitions = const [],
   });
 
   /// W25Q128: common 16MB SPI flash (e.g., on iCEBreaker, OrangeCrab).
@@ -72,6 +103,7 @@ class HarborSpiFlashConfig with HarborPrettyString {
     this.spiFrequency = 50000000,
     this.mode = HarborSpiFlashMode.quad,
     this.readAheadWords = 1,
+    this.partitions = const [],
   }) : size = 16 * 1024 * 1024,
        pageSize = 256,
        sectorSize = 4096,
@@ -84,6 +116,7 @@ class HarborSpiFlashConfig with HarborPrettyString {
     this.spiFrequency = 50000000,
     this.mode = HarborSpiFlashMode.quad,
     this.readAheadWords = 1,
+    this.partitions = const [],
   }) : size = 16 * 1024 * 1024,
        pageSize = 256,
        sectorSize = 4096,
@@ -96,6 +129,7 @@ class HarborSpiFlashConfig with HarborPrettyString {
     this.spiFrequency = 50000000,
     this.mode = HarborSpiFlashMode.quad,
     this.readAheadWords = 1,
+    this.partitions = const [],
   }) : size = 32 * 1024 * 1024,
        pageSize = 256,
        sectorSize = 4096,
@@ -1051,6 +1085,30 @@ class HarborSpiFlashController extends BridgeModule
       if (config.mode == HarborSpiFlashMode.quad) 'spi-tx-bus-width': 4,
       if (config.mode == HarborSpiFlashMode.dual) 'spi-tx-bus-width': 2,
     },
+    // A `fixed-partitions` map (the standard Linux MTD binding): the FSBL reads
+    // it for the firmware offset and Linux exposes each as /dev/mtdN.
+    children: config.partitions.isEmpty
+        ? const []
+        : [
+            HarborDeviceTreeChild(
+              name: 'partitions',
+              properties: const {
+                'compatible': 'fixed-partitions',
+                '#address-cells': 1,
+                '#size-cells': 1,
+              },
+              children: [
+                for (final part in config.partitions)
+                  HarborDeviceTreeChild(
+                    name: 'partition@${part.offset.toRadixString(16)}',
+                    properties: {
+                      'reg': [part.offset, part.size],
+                      'label': part.label,
+                    },
+                  ),
+              ],
+            ),
+          ],
   );
 
   @override

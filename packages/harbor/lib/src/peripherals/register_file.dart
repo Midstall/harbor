@@ -114,6 +114,22 @@ class HarborRegisterFile extends BridgeModule {
     }
   }
 
+  /// The SystemVerilog module name. It carries every parameter that alters the
+  /// generated body so structurally-distinct files stay distinct.
+  static String _definitionName({
+    required int numEntries,
+    required int dataWidth,
+    required int numReadPorts,
+    required int numWritePorts,
+    required int numBanks,
+    required int readLatency,
+    required int writeBufferDepth,
+    required bool reservedZero,
+  }) =>
+      'HarborRegisterFile_E${numEntries}_W${dataWidth}_'
+      'R${numReadPorts}_W${numWritePorts}_B${numBanks}_'
+      'L${readLatency}_BUF${writeBufferDepth}_Z${reservedZero ? 1 : 0}';
+
   HarborRegisterFile({
     this.numEntries = 32,
     this.dataWidth = 32,
@@ -130,8 +146,26 @@ class HarborRegisterFile extends BridgeModule {
            forceReadLatency ??
            _defaultReadLatency(target, numWritePorts, numBanks),
        super(
-         'HarborRegisterFile_E${numEntries}_W${dataWidth}_'
-         'R${numReadPorts}_W${numWritePorts}_B$numBanks',
+         // The definition name must encode every parameter that changes the
+         // generated body, so two structurally-different register files never
+         // collide onto one reserved module name (the ROHD uniquifier throws on
+         // a reserved-name clash). E/W/R/W/B alone is not enough: read latency
+         // (the +1 read-pipeline stage), the write buffer, and the x0-zero
+         // semantics all rewrite the body. A Full core hits this: its integer
+         // file (Xilinx BRAM, latency 1, x0=zero) and FP file (flop, latency 0,
+         // no zero register) share E32_W64_R2_W1_B1.
+         _definitionName(
+           numEntries: numEntries,
+           dataWidth: dataWidth,
+           numReadPorts: numReadPorts,
+           numWritePorts: numWritePorts,
+           numBanks: numBanks,
+           readLatency:
+               forceReadLatency ??
+               _defaultReadLatency(target, numWritePorts, numBanks),
+           writeBufferDepth: writeBufferDepth,
+           reservedZero: reservedZero,
+         ),
          name: name ?? 'regfile',
        ) {
     if (numReadPorts < 1) {
@@ -508,9 +542,26 @@ class HarborRegisterFile extends BridgeModule {
         slices.add(bram.output('DOBDO').getRange(0, sliceWidth));
       }
 
-      final raw = slices.length == 1
+      final rawBram = slices.length == 1
           ? slices.first.zeroExtend(dataWidth)
           : slices.rswizzle().getRange(0, dataWidth);
+
+      // Read-during-write bypass. Port A (write) and port B (read) are both
+      // permanently enabled, so a same-cycle write and read of the SAME entry
+      // is a RAMB36E1 A/B address collision: port B returns X on 7-series
+      // silicon (UG473), while the flop model returns the old value. Neither is
+      // usable. Forward the write data (aligned to the registered-read latency)
+      // so a read of an entry being written returns the just-written value, the
+      // standard write-first register-file semantics. This kills the collision
+      // X the flop sim structurally cannot see.
+      final rdwHit = _registerN(
+        clk,
+        (wrEn & wrAddr.eq(rdAddrs[r])).named('rfBramRdwHit_$r'),
+        readLatency,
+        'rfBramRdwHitQ_$r',
+      );
+      final rdwData = _registerN(clk, wrData, readLatency, 'rfBramRdwData_$r');
+      final raw = mux(rdwHit, rdwData, rawBram).named('rfBramRead_$r');
 
       // x0 reads as zero (only when entry 0 is reserved), delayed to match the
       // registered read latency.
@@ -661,7 +712,27 @@ class HarborRegisterFile extends BridgeModule {
         ),
     ]);
     for (var r = 0; r < rdAddrs.length; r++) {
-      rdDatas[r] <= _registerN(clk, rdComb[r], readLatency, 'rfRdLat_$r');
+      // Read-during-write bypass, matching the fixed Xilinx BRAM path so the
+      // flop sim == silicon: a read of the entry being written this cycle
+      // returns the write data (write-first forwarding). x0 stays zero.
+      Logic bwEn = bankWinEn[0];
+      Logic bwAddr = bankWinAddr[0];
+      Logic bwData = bankWinData[0];
+      if (numBanks > 1) {
+        final sel = _bankOf(rdAddrs[r]);
+        for (var b = 1; b < numBanks; b++) {
+          final isB = sel.eq(Const(b, width: _bankBits));
+          bwEn = mux(isB, bankWinEn[b], bwEn);
+          bwAddr = mux(isB, bankWinAddr[b], bwAddr);
+          bwData = mux(isB, bankWinData[b], bwData);
+        }
+      }
+      final notZero = reservedZero ? ~rdAddrs[r].eq(zeroAddr) : Const(1);
+      final collide = (bwEn & bwAddr.eq(rdAddrs[r]) & notZero).named(
+        'rfFlopRdw_$r',
+      );
+      final bypassed = mux(collide, bwData, rdComb[r]);
+      rdDatas[r] <= _registerN(clk, bypassed, readLatency, 'rfRdLat_$r');
     }
   }
 

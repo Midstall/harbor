@@ -3,26 +3,27 @@
  * Harbor eFuse (OTP) controller driver (nvmem)
  *
  * Registers:
- *   0x00: CTRL       0x04: STATUS     0x08: ADDR
- *   0x0C: RDATA      0x10: WDATA      0x14: LOCK
- *   0x18: TIMING     0x1C: KEY
+ *   0x00: CTRL       0x08: STATUS     0x10: ADDR
+ *   0x18: RDATA      0x20: WDATA      0x28: LOCK
+ *   0x30: TIMING     0x38: KEY
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/nvmem-provider.h>
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/delay.h>
 
 #define HARBOR_EFUSE_CTRL   0x00
-#define HARBOR_EFUSE_STATUS 0x04
-#define HARBOR_EFUSE_ADDR   0x08
-#define HARBOR_EFUSE_RDATA  0x0C
-#define HARBOR_EFUSE_WDATA  0x10
-#define HARBOR_EFUSE_LOCK   0x14
-#define HARBOR_EFUSE_TIMING 0x18
-#define HARBOR_EFUSE_KEY    0x1C
+#define HARBOR_EFUSE_STATUS 0x08
+#define HARBOR_EFUSE_ADDR   0x10
+#define HARBOR_EFUSE_RDATA  0x18
+#define HARBOR_EFUSE_WDATA  0x20
+#define HARBOR_EFUSE_LOCK   0x28
+#define HARBOR_EFUSE_TIMING 0x30
+#define HARBOR_EFUSE_KEY    0x38
 
 #define HARBOR_EFUSE_STATUS_BUSY BIT(0)
 #define HARBOR_EFUSE_STATUS_DONE BIT(1)
@@ -125,16 +126,15 @@ static int harbor_efuse_probe(struct platform_device *pdev)
 	if (IS_ERR(he->base))
 		return PTR_ERR(he->base);
 
-	of_property_read_u32(pdev->dev.of_node, "harbor,total-bits",
-			     &total_bits);
-	of_property_read_u32(pdev->dev.of_node, "harbor,bits-per-word",
-			     &bits_per_word);
+	device_property_read_u32(&pdev->dev, "harbor,total-bits", &total_bits);
+	device_property_read_u32(&pdev->dev, "harbor,bits-per-word",
+				 &bits_per_word);
 
 	he->total_bits = total_bits;
 	he->bits_per_word = bits_per_word;
 	he->unlock_key = 0x4F545021; /* default "OTP!" */
-	of_property_read_u32(pdev->dev.of_node, "harbor,unlock-key",
-			     &he->unlock_key);
+	device_property_read_u32(&pdev->dev, "harbor,unlock-key",
+				 &he->unlock_key);
 
 	cfg.name = "harbor-efuse";
 	cfg.dev = &pdev->dev;

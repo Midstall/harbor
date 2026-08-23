@@ -28,11 +28,27 @@ class DdrTiming {
   /// DDR3 CK period in ns (e.g. 3.0 = 333 MHz, 3.333 = 300 MHz).
   final double ddr3ClkPeriodNs;
 
-  /// Controller-interface clock period in ns (= [serdesRatio] * CK period).
+  /// Controller-interface clock period in ns (= [controllerClkRatio] * CK
+  /// period). This is the period of the clock the controller LOGIC runs at, so
+  /// every ns->cycle counter (refresh, init, AC delays) is measured against it.
+  /// At [gearRatio] 1 it equals [serdesRatio] * CK; at [gearRatio] 2 (the CK/8
+  /// controller) it is 8 * CK, so a refresh counter still fires at the same
+  /// real (ns) interval rather than half as often.
   final double controllerClkPeriodNs;
 
-  /// SERDES ratio (4 for a 4:1 real-speed PHY).
+  /// SERDES DATAPATH ratio (CK per OSERDES/ISERDES CLKDIV tick, 4 for a 4:1
+  /// real-speed PHY). This sizes the command WORD (the mod-[serdesRatio] slot
+  /// placement + the intra-window part of [findDelay]) and is INDEPENDENT of how
+  /// slow the controller logic runs.
   final int serdesRatio;
+
+  /// Controller-LOGIC clock ratio (CK per controller-logic cycle). Equals
+  /// [serdesRatio] historically (no gearbox); doubles to 8 for the CK/8
+  /// controller. Every counter that measures a WAIT in controller cycles
+  /// (nckToCycles, nsToCycles, the cross-cycle term of findDelay, the refresh/
+  /// init ROM payloads) uses THIS, not [serdesRatio]. Using serdesRatio here
+  /// while the logic runs at CK/8 would halve the refresh rate -> DRAM decay.
+  final int controllerClkRatio;
 
   /// Device density (selects tRFC).
   final DdrDensity density;
@@ -40,16 +56,21 @@ class DdrTiming {
   DdrTiming({
     required this.ddr3ClkPeriodNs,
     required this.serdesRatio,
+    int? controllerClkRatio,
     this.density = DdrDensity.gb2,
-  }) : controllerClkPeriodNs = ddr3ClkPeriodNs * serdesRatio;
+  }) : controllerClkRatio = controllerClkRatio ?? serdesRatio,
+       controllerClkPeriodNs =
+           ddr3ClkPeriodNs * (controllerClkRatio ?? serdesRatio);
 
   DdrTiming.fromPs({
     required int ddr3ClkPeriodPs,
     required int serdesRatio,
+    int? controllerClkRatio,
     DdrDensity density = DdrDensity.gb2,
   }) : this(
          ddr3ClkPeriodNs: ddr3ClkPeriodPs / 1000.0,
          serdesRatio: serdesRatio,
+         controllerClkRatio: controllerClkRatio,
          density: density,
        );
 
@@ -58,8 +79,9 @@ class DdrTiming {
   /// ns -> controller cycles, rounded up.
   int nsToCycles(double ns) => (ns / controllerClkPeriodNs).ceil();
 
-  /// DDR cycles (nCK) -> controller cycles, rounded up.
-  int nckToCycles(int nck) => (nck / serdesRatio).ceil();
+  /// DDR cycles (nCK) -> controller cycles, rounded up. Measures a WAIT, so it
+  /// divides by [controllerClkRatio] (CK per controller cycle), NOT serdesRatio.
+  int nckToCycles(int nck) => (nck / controllerClkRatio).ceil();
 
   /// ns -> DDR cycles (nCK), rounded up.
   int nsToNck(double ns) => (ns / ddr3ClkPeriodNs).ceil();
@@ -138,10 +160,18 @@ class DdrTiming {
     return slot;
   }
 
-  /// find_delay: controller cycles k so `(4 - start) + end + 4k >= delayNck`.
+  /// find_delay: the smallest number of controller cycles k such that the
+  /// guaranteed CK separation `(serdesRatio - start) + end + controllerClkRatio*k`
+  /// reaches delayNck. The `(serdesRatio - start) + end` part measures CK WITHIN
+  /// the command WORDs (both commands sit in their 4-slot OSERDES window), so it
+  /// scales with [serdesRatio] and stays 4-wide. The `k` term steps whole
+  /// controller cycles, so it scales with [controllerClkRatio] (8 at CK/8) - the
+  /// cross-cycle CK count, which is what makes the delay counter correct when the
+  /// logic runs slower than the SERDES.
   int findDelay(int delayNck, int startSlot, int endSlot) {
     var k = 0;
-    while (((4 - startSlot) + endSlot + 4 * k) < delayNck) {
+    while (((serdesRatio - startSlot) + endSlot + controllerClkRatio * k) <
+        delayNck) {
       k++;
     }
     return k;

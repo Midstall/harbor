@@ -1,4 +1,5 @@
 import '../encoding/bit_struct.dart';
+import '../encoding/riscv_formats.dart';
 import '../encoding/rvc_immediate.dart';
 import 'micro_op.dart';
 import 'mxlen.dart';
@@ -150,7 +151,18 @@ class RiscVOperation {
   bool matches(int opcode, int? funct3, int? funct7) {
     if (this.opcode != opcode) return false;
     if (this.funct3 != null && this.funct3 != funct3) return false;
-    if (this.funct7 != null && this.funct7 != funct7) return false;
+    if (this.funct7 != null && funct7 != null) {
+      if (this.opcode == RiscvOpcode.amo) {
+        // AMO/LR/SC: funct7[1:0] are the aq/rl ordering hints, not part of the
+        // operation selector (funct5 = funct7[6:2]). Ignore them so ordered
+        // atomics match. Mirrors the hardware decoder.
+        if ((this.funct7! >> 2) != (funct7 >> 2)) return false;
+      } else if (this.funct7 != funct7) {
+        return false;
+      }
+    } else if (this.funct7 != null && this.funct7 != funct7) {
+      return false;
+    }
     return true;
   }
 

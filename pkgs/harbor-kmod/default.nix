@@ -38,25 +38,21 @@ stdenv.mkDerivation {
     "KDIR=${kernel.dev}/lib/modules/${kernel.modDirVersion}/build"
   ];
 
+  # The Makefile builds a module only when the kernel has the subsystem that
+  # the module needs, so the set of modules changes with the kernel. Install
+  # the modules that the build made, and make sure that it made some.
   installPhase = ''
     runHook preInstall
-    install -D -t $out/lib/modules/${kernel.modDirVersion}/extra/harbor \
-      gpio/harbor_gpio.ko \
-      spi/harbor_spi.ko \
-      i2c/harbor_i2c.ko \
-      sdio/harbor_sdhci.ko \
-      dma/harbor_dma.ko \
-      pwm/harbor_pwm.ko \
-      watchdog/harbor_wdt.ko \
-      ethernet/harbor_eth.ko \
-      usb/harbor_usb.ko \
-      display/harbor_display.ko \
-      pmu/harbor_pmu.ko \
-      pcie/harbor_pcie.ko \
-      hwmon/harbor_temp.ko \
-      media/harbor_media.ko \
-      audio/harbor_audio.ko \
-      efuse/harbor_efuse.ko
+
+    modules=$(find . -name '*.ko' -print)
+    if [ -z "$modules" ]; then
+      echo "harbor-kmod: the build made no modules" >&2
+      exit 1
+    fi
+
+    echo "harbor-kmod: installing$(echo "$modules" | sed 's|^\./| |' | tr -d '\n')"
+    install -D -t $out/lib/modules/${kernel.modDirVersion}/extra/harbor $modules
+
     runHook postInstall
   '';
 

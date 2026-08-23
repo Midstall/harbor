@@ -1,5 +1,8 @@
 import 'package:rohd/rohd.dart';
 
+import '../soc/target.dart';
+import 'tmds_serializer.dart';
+
 import '../peripherals/display.dart';
 import 'dvi_transmitter.dart';
 import 'video_timing.dart';
@@ -19,6 +22,10 @@ class DviOutput extends Module {
   /// Four serialized TMDS lanes: bit3 clock, bit2 red, bit1 green, bit0 blue.
   Logic get gpdi => output('gpdi');
 
+  /// The four complement lanes, present only on a target that drives its own
+  /// ([TmdsSerializer.needsComplement]).
+  Logic get gpdiN => output('gpdi_n');
+
   final HarborDisplayTiming timing;
 
   DviOutput({
@@ -27,6 +34,7 @@ class DviOutput extends Module {
     required Logic shiftClk,
     required Logic pixelReset,
     required Logic shiftReset,
+    required HarborDeviceTarget target,
     super.name = 'dvi_output',
   }) : super(definitionName: 'DviOutput') {
     pixelClk = addInput('pixel_clk', pixelClk);
@@ -34,6 +42,10 @@ class DviOutput extends Module {
     pixelReset = addInput('pixel_reset', pixelReset);
     shiftReset = addInput('shift_reset', shiftReset);
     addOutput('gpdi', width: 4);
+    final tmdsComplement = TmdsSerializer.needsComplement(target);
+    if (tmdsComplement) {
+      addOutput('gpdi_n', width: 4);
+    }
 
     final vtg = VideoTimingGenerator(
       timing: timing,
@@ -49,6 +61,7 @@ class DviOutput extends Module {
     final blue = (~x[6]).replicate(8);
 
     final tx = DviTransmitter(
+      target: target,
       pixelClk: pixelClk,
       shiftClk: shiftClk,
       pixelReset: pixelReset,
@@ -62,5 +75,8 @@ class DviOutput extends Module {
     );
 
     gpdi <= tx.gpdi;
+    if (tmdsComplement) {
+      gpdiN <= tx.gpdiN;
+    }
   }
 }

@@ -21,6 +21,7 @@ void main() {
     final blue = Logic(name: 'blue', width: 8);
 
     final tx = DviTransmitter(
+      target: const HarborSimTarget(),
       pixelClk: pixelClk,
       shiftClk: shiftClk,
       pixelReset: pixelReset,

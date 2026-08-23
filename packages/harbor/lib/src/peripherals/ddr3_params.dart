@@ -13,8 +13,15 @@
 library;
 
 class DdrParams {
-  /// Controller-interface clock period in picoseconds. Must be [serdesRatio]
-  /// times [ddr3ClkPeriodPs] (a 4:1 SERDES ratio for a real-speed DDR3 PHY).
+  /// Controller-LOGIC clock period in picoseconds. Must be an integer multiple
+  /// of [ddr3ClkPeriodPs] that is itself a multiple of [serdesRatio]. When it
+  /// equals [serdesRatio] * [ddr3ClkPeriodPs] the controller clock IS the SERDES
+  /// CLKDIV (no gearbox, [gearRatio] == 1, the historical 4:1 arrangement). When
+  /// it is a larger multiple (e.g. 8x CK with a 4-wide SERDES = [gearRatio] 2),
+  /// the controller logic runs slower than the SERDES datapath and a fabric
+  /// [gearRatio]:1 gearbox bridges them. Slowing the logic buys timing margin
+  /// for the congestion-limited command scheduler on a dense open-tools part,
+  /// at the cost of proportionally lower peak DDR command bandwidth.
   final int controllerClkPeriodPs;
 
   /// DDR3 device clock (CK) period in picoseconds (e.g. 3000 = 333.3 MHz,
@@ -65,9 +72,18 @@ class DdrParams {
   /// Dual-rank DIMM support (adds a rank address bit). Single-rank device = false.
   final bool dualRankDimm;
 
+  /// SERDES DATAPATH ratio = CK cycles per SERDES CLKDIV tick = beats-per-BL8 / 2
+  /// = 4 for a real-speed 7-series PHY (OSERDESE2/ISERDESE2 DATA_WIDTH 8, DDR).
+  /// This fixes the datapath width ([wbDataBits]) and the SERDES config; it is
+  /// INDEPENDENT of the controller-logic clock. Do not exceed 4 on 7-series
+  /// (single-primitive OSERDESE2 max). Slowing the controller uses a larger
+  /// [controllerClkPeriodPs] + the gearbox, not a larger serdesRatio.
+  final int serdesRatio;
+
   const DdrParams({
     required this.controllerClkPeriodPs,
     required this.ddr3ClkPeriodPs,
+    this.serdesRatio = 4,
     this.rowBits = 14,
     this.colBits = 10,
     this.baBits = 3,
@@ -82,14 +98,28 @@ class DdrParams {
     this.eccEnable = false,
     this.dualRankDimm = false,
   }) : assert(dqBits == 8, 'DDR3 DQ is 8 bits per lane'),
-       assert(lanes == 1 || lanes == 2, 'x8 (1) or x16 (2)');
+       assert(lanes == 1 || lanes == 2, 'x8 (1) or x16 (2)'),
+       assert(serdesRatio >= 1, 'serdesRatio must be >= 1'),
+       // The controller clock must be an integer multiple of the SERDES CLKDIV
+       // rate (serdesRatio * CK), so the fabric gearbox is a clean integer ratio.
+       assert(
+         controllerClkPeriodPs % (serdesRatio * ddr3ClkPeriodPs) == 0,
+         'controllerClkPeriodPs must be an integer multiple of '
+         'serdesRatio * ddr3ClkPeriodPs (so gearRatio is integer)',
+       );
 
   /// Digilent Arty S7: Micron MT41K128M16, x16, 256 MB, HR I/O bank. [ckPeriodPs]
   /// sets the DDR CK (3000 = 333 MHz, 3333 = 300 MHz); the controller clock is
-  /// four times slower (the 4:1 SERDES ratio).
-  factory DdrParams.artyS7({int ckPeriodPs = 3000}) => DdrParams(
+  /// `4 * controllerGearRatio` times slower than CK. [controllerGearRatio] 1 (the
+  /// default) is the historical CK/4 controller ([gearRatio] 1, no gearbox); 2
+  /// runs the controller LOGIC at CK/8 through the fabric gearbox for timing
+  /// margin ([gearRatio] 2) while the SERDES stays at CK/4.
+  factory DdrParams.artyS7({
+    int ckPeriodPs = 3000,
+    int controllerGearRatio = 1,
+  }) => DdrParams(
     ddr3ClkPeriodPs: ckPeriodPs,
-    controllerClkPeriodPs: ckPeriodPs * 4,
+    controllerClkPeriodPs: ckPeriodPs * 4 * controllerGearRatio,
     rowBits: 14,
     colBits: 10,
     baBits: 3,
@@ -101,8 +131,17 @@ class DdrParams {
 
   // --- derived geometry (mirrors the UberDDR3 localparams) ---
 
-  /// SERDES ratio = controller period / CK period (4 for a 4:1 real-speed PHY).
-  int get serdesRatio => controllerClkPeriodPs ~/ ddr3ClkPeriodPs;
+  /// Controller-LOGIC clock ratio = CK cycles per controller-logic tick =
+  /// controllerClkPeriodPs / CK. 4 historically (== serdesRatio, no gearbox);
+  /// 8 for the CK/8 controller (gearRatio 2). Drives the AC-timing counters.
+  int get controllerClkRatio => controllerClkPeriodPs ~/ ddr3ClkPeriodPs;
+
+  /// Fabric gearbox ratio = controller-logic cycles' worth of SERDES loads per
+  /// controller tick = controllerClkRatio / serdesRatio. 1 = the controller
+  /// clock IS the SERDES CLKDIV (no gearbox, historical). 2 = a CK/8 controller
+  /// feeding a CK/4 SERDES: the gearbox drives one BL8 into slot 0 of the pair
+  /// and a NOP into slot 1 (half the peak command bandwidth).
+  int get gearRatio => controllerClkRatio ~/ serdesRatio;
 
   /// Burst-addressable {row, bank, col} address, minus the bits a single
   /// wishbone word already spans across the SERDES burst.

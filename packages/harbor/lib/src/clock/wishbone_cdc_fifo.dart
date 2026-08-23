@@ -21,6 +21,16 @@ import 'cdc.dart';
 /// supports it (keeps the depth off the flop budget), else flops. [depth] is the
 /// per-direction FIFO depth (power of two). Deeper buffers more in flight and
 /// gives the pointer synchronizers a moving target to latch.
+///
+/// With [postedWrites], a WRITE is ACKed on the slave side as soon as its
+/// payload is captured into the request FIFO, and the master side pushes no
+/// response for it. The slave therefore never waits for a round trip on a
+/// write, and up to [depth] writes are in flight while the master domain drains
+/// them at its own rate. Reads keep the single-outstanding request/response
+/// handshake. Ordering is preserved because both go through the same request
+/// FIFO, so a read is always served after every write queued before it. The
+/// cost is that a write can no longer report an error, which is what "posted"
+/// means. Without the flag the bridge is strictly one transaction in flight.
 class HarborWishboneCdcFifoBridge extends BridgeModule {
   /// Address bus width.
   final int addressWidth;
@@ -40,6 +50,11 @@ class HarborWishboneCdcFifoBridge extends BridgeModule {
   /// Back the FIFO storage with block RAM where [target] supports it.
   final bool blockRam;
 
+  /// ACK a write as soon as the request FIFO captures it, and drop its
+  /// response. Lets the slave side stream writes instead of paying a crossing
+  /// round trip per word.
+  final bool postedWrites;
+
   HarborWishboneCdcFifoBridge({
     required this.addressWidth,
     required this.dataWidth,
@@ -47,13 +62,20 @@ class HarborWishboneCdcFifoBridge extends BridgeModule {
     this.depth = 8,
     this.target,
     this.blockRam = false,
+    this.postedWrites = false,
     super.name = 'wishbone_cdc_fifo',
   }) : selWidth = selWidth ?? (dataWidth ~/ 8),
        assert(
          depth >= 2 && (depth & (depth - 1)) == 0,
          'depth must be a power of two and >= 2',
        ),
-       super('HarborWishboneCdcFifoBridge') {
+       // Distinct definition name: two instances that differ only in this flag
+       // behave differently, so they must not dedupe onto one definition.
+       super(
+         postedWrites
+             ? 'HarborWishboneCdcFifoBridgePosted'
+             : 'HarborWishboneCdcFifoBridge',
+       ) {
     final sw = this.selWidth;
     final aw = addressWidth;
     final dw = dataWidth;
@@ -109,11 +131,16 @@ class HarborWishboneCdcFifoBridge extends BridgeModule {
     final ackReg = Logic(name: 's_ack_reg');
     final sDatRReg = Logic(name: 's_dat_r_reg', width: dw);
 
+    final sReq = (input('s_cyc') & input('s_stb')).named('s_req');
     final reqFull = reqFifo.output('wr_full');
-    final reqPush =
-        (input('s_cyc') & input('s_stb') & ~pending & ~ackReg & ~reqFull).named(
-          'req_push',
-        );
+    // A posted write never sets `pending`, so `~ackReg` alone spaces it: ACK is
+    // a one-cycle pulse, and a master that holds its request through the ACK
+    // gets exactly one push per ACK, the same as a read.
+    final reqPush = (sReq & ~pending & ~ackReg & ~reqFull).named('req_push');
+    // A posted write completes entirely on the slave side.
+    final postedPush = postedWrites
+        ? (reqPush & input('s_we')).named('posted_push')
+        : Const(0);
     reqFifo.input('wr_clk').srcConnection! <= sClk;
     reqFifo.input('wr_reset').srcConnection! <= sReset;
     reqFifo.input('wr_en').srcConnection! <= reqPush;
@@ -141,7 +168,18 @@ class HarborWishboneCdcFifoBridge extends BridgeModule {
         ],
         orElse: [
           ackReg < Const(0),
-          If(reqPush, then: [pending < Const(1)]),
+          If(
+            reqPush,
+            then: [
+              // A posted write is done here. Anything else waits for the
+              // response FIFO to hand back a result.
+              If(
+                postedPush,
+                then: [ackReg < Const(1)],
+                orElse: [pending < Const(1)],
+              ),
+            ],
+          ),
           If(
             respPop,
             then: [
@@ -166,6 +204,17 @@ class HarborWishboneCdcFifoBridge extends BridgeModule {
       'start_serve',
     );
     final complete = (serving & mCycReg & input('m_ack')).named('complete');
+    // The head carries { we, adr, dat_w, sel }, so its top bit says whether the
+    // transaction in flight is a write.
+    final headWe = reqFifo
+        .output('rd_data')
+        .slice(reqW - 1, reqW - 1)
+        .named('head_we');
+    // A posted write was already ACKed on the slave side. Pushing a response
+    // for it would desynchronize the response FIFO from the pending read.
+    final respPush = postedWrites
+        ? (complete & ~headWe).named('resp_push')
+        : complete;
 
     reqFifo.input('rd_clk').srcConnection! <= mClk;
     reqFifo.input('rd_reset').srcConnection! <= mReset;
@@ -175,7 +224,7 @@ class HarborWishboneCdcFifoBridge extends BridgeModule {
 
     respFifo.input('wr_clk').srcConnection! <= mClk;
     respFifo.input('wr_reset').srcConnection! <= mReset;
-    respFifo.input('wr_en').srcConnection! <= complete;
+    respFifo.input('wr_en').srcConnection! <= respPush;
     respFifo.input('wr_data').srcConnection! <= input('m_dat_r');
 
     Sequential(mClk, [

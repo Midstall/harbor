@@ -6,6 +6,7 @@ import '../bus/bus_slave_port.dart';
 import '../soc/acpi.dart';
 import '../soc/device_tree.dart';
 import '../soc/svd.dart';
+import '../soc/target.dart';
 import 'device_register.dart';
 
 /// 16550-compatible UART peripheral.
@@ -32,10 +33,12 @@ class HarborUart extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
         HarborAcpiDeviceProvider,
-        HarborSvdPeripheralProvider {
+        HarborSvdPeripheralProvider,
+        HarborSimModelProvider,
+        HarborInputClockConsumer {
   final int? busDataWidth;
   final int baseAddress;
-  final int clockFrequency;
+  int clockFrequency;
 
   /// TX serial output.
   Logic get tx => output('tx');
@@ -410,6 +413,111 @@ class HarborUart extends BridgeModule
     Combinational([
       If(txBusy, then: [tx < txShift[0]], orElse: [tx < Const(1)]),
     ]);
+  }
+
+  /// A terminal on the TX line: decodes 8N1 serial and writes bytes to stdout.
+  ///
+  /// The divisor is a runtime register, so the bit period cannot be known when
+  /// this is generated. The default assumes the firmware programs
+  /// `<this peripheral's clock>` / 115200; override with
+  /// `--uart-cycles-per-bit=N`. A wrong value is reported as a framing error
+  /// rather than printed as mojibake, so the failure names its own cause.
+  ///
+  /// The tick domain and the bit period BOTH come from
+  /// [HarborSimModelContext.peripheralClockPort]. Taking them from different
+  /// clocks is what made the first version print garbage: it ticked on the
+  /// 100 MHz primary while sizing bits for a 50 MHz UART clock.
+  @override
+  List<HarborSimModel> simModels(HarborSimModelContext ctx) {
+    final txPort = ctx.topPort('tx');
+    // Not exposed at the top level, so nothing on the host can see it.
+    if (txPort == null) return const [];
+    // The harness level-gates every model on its clockPort, which only ticks
+    // once per cycle for the FASTEST (primary) clock; a slower clockPort would
+    // fire several times per cycle. So the sink ticks on the primary clock and
+    // measures the bit period in PRIMARY ticks: it oversamples the tx line and
+    // counts real time, which is correct whatever clock the UART sits on (the
+    // firmware programs 115200 baud in real time regardless of its divisor).
+    final cyclesPerBit = (ctx.clockHz / 115200).round().clamp(2, 1 << 30);
+    final inst = '${name}_sink';
+    return [
+      HarborSimModel(
+        className: 'UartSink',
+        clockPort: ctx.primaryClockPort,
+        header: _uartSinkHeader,
+        declaration: 'static UartSink $inst($cyclesPerBit, "$name");',
+        tick: '$inst.tick(top->$txPort);',
+        cliOption:
+            'else if (!strncmp(argv[a], "--uart-cycles-per-bit=", 22))\n'
+            '      $inst.cycles_per_bit = atoi(argv[a] + 22);',
+      ),
+    ];
+  }
+
+  static const _uartSinkHeader = r"""
+#pragma once
+// Decodes 8N1 serial on a UART TX line and writes each byte to stdout.
+//
+// Samples at the middle of every bit: on the falling start edge it waits 1.5
+// bit periods to land in the centre of bit 0, then one period per bit after
+// that. The stop bit must read high; if it does not, the configured bit period
+// disagrees with what the firmware programmed, which is reported rather than
+// letting the output turn to garbage.
+#include <cstdio>
+#include <cstdint>
+
+struct UartSink {
+  const char* tag;
+  int cycles_per_bit;
+  int state = 0;   // 0 = idle, 1 = receiving
+  int counter = 0;
+  int bit_index = 0;
+  uint8_t shifter = 0;
+  int prev = 1;    // the line idles high
+  long framing_errors = 0;
+
+  UartSink(int cpb, const char* t) : tag(t), cycles_per_bit(cpb) {}
+
+  void tick(int tx) {
+    if (state == 0) {
+      if (prev == 1 && tx == 0) {
+        state = 1;
+        // 1.5 bit periods lands in the middle of bit 0.
+        counter = cycles_per_bit + cycles_per_bit / 2;
+        bit_index = 0;
+        shifter = 0;
+      }
+    } else if (--counter <= 0) {
+      if (bit_index < 8) {
+        shifter >>= 1;                       // LSB first
+        if (tx) shifter |= 0x80;
+        bit_index++;
+        counter = cycles_per_bit;
+      } else {
+        if (tx) {
+          fputc(shifter, stdout);
+          fflush(stdout);
+        } else if (++framing_errors <= 4) {
+          fprintf(stderr,
+                  "[%s] UART framing error: stop bit low. The bit period "
+                  "(%d cycles) does not match the programmed divisor; set "
+                  "--uart-cycles-per-bit=N\n",
+                  tag, cycles_per_bit);
+        }
+        state = 0;
+      }
+    }
+    prev = tx;
+  }
+};
+""";
+
+  @override
+  int get inputClockHz => clockFrequency;
+
+  @override
+  void provideInputClockHz(int hz) {
+    if (clockFrequency == 0) clockFrequency = hz;
   }
 
   @override

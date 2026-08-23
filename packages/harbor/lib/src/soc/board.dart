@@ -28,6 +28,14 @@ class HarborBoard {
   /// the format [HarborFpgaTarget] renders into constraints.
   final Map<String, String> pins;
 
+  /// Named external connectors (a Pmod header, a built-in card slot, ...). Each
+  /// entry maps a peripheral pad role to a `"SITE [IO_TYPE] [ATTR]"` string, in
+  /// the same format as [pins]. A device with `iface=<name>` (e.g. an `spi`
+  /// controller) binds its pads to the roles here, so the board author bakes the
+  /// connector wiring once (e.g. the Digilent Pmod-SPI convention) and an SoC
+  /// need not hand-enter Pmod sites. SPI roles: `sck`, `mosi`, `miso`, `cs`.
+  final Map<String, Map<String, String>> interfaces;
+
   /// Bitstream programming command for the generated `prog` Makefile target.
   final String? progCommand;
 
@@ -42,6 +50,7 @@ class HarborBoard {
     required this.package,
     required this.oscillatorHz,
     required this.pins,
+    this.interfaces = const {},
     this.progCommand,
     this.clockPortName = 'clk',
   });
@@ -170,11 +179,21 @@ const _orangeCrab25f = HarborBoard(
 /// oscillator, via the open-source openXC7 flow (yosys synth_xilinx +
 /// nextpnr-xilinx + prjxray, the only Xilinx flow that runs on aarch64).
 ///
-/// Covers the oscillator and the USB-UART bridge (the HW-proven Weir-boot pins).
-/// The config SPI flash and DDR3L sdram_* sites (Micron MT41K128M16, from the
-/// litex arty_s7 platform) stay authoritative in River's boards.dart, pulled in
-/// per memory region (`flash:...:arty-s7`, `dram:...:arty-s7-x8`), so they are
-/// intentionally not duplicated here.
+/// Covers the oscillator, the USB-UART bridge (the HW-proven Weir-boot pins),
+/// a TMDS adapter on Pmod JB, and the DDR3L sdram_* sites.
+///
+/// The DDR3L part is a Micron MT41K128M16: 256 MB, x16, sites from the
+/// litex/migen `arty_s7` platform. Every project that drives this board wants
+/// the same table, so it belongs here and not beside one project's generator.
+/// Pair it with `DdrParams.artyS7()`, which carries the geometry.
+///
+/// CK and DQS are single-ended SSTL135 on BOTH the _p and the _n ball, not a
+/// true differential pair. The DLL-off PHY drives the complement itself, so
+/// there is no hard OBUFDS pair for a DIFF_SSTL135 site to feed. The XDC
+/// writer emits PACKAGE_PIN and IOSTANDARD only, so migen's IN_TERM and SLEW
+/// attributes are dropped.
+///
+/// The config SPI flash sites are still not here.
 const _artyS7_50 = HarborBoard(
   name: 'arty-s7-50',
   vendor: HarborFpgaVendor.openXc7,
@@ -185,5 +204,116 @@ const _artyS7_50 = HarborBoard(
     'clk': 'R2', // 100 MHz board oscillator
     'uart_tx': 'R12 LVCMOS33', // FPGA -> USB-UART bridge RX (Pmod/onboard)
     'uart_rx': 'V12 LVCMOS33', // FPGA <- USB-UART bridge TX
+    // A passive TMDS adapter (the MuseLab/iCESugar PMOD-HDMI) on header JB.
+    // These are the same eight balls as `pmod@jb`, read as a display instead,
+    // so a build binds one or the other and never both.
+    //
+    // Both pins of a lane are plain LVCMOS33, NOT a differential pair, which
+    // is what the iCESugar reference design does: the open Xilinx flow has no
+    // TMDS_33 site, and the adapter is passive, so the design puts out the
+    // true lane AND the complement itself.
+    //
+    // The adapter pairs a lane ACROSS the two rows of the header (its pin 1
+    // with its pin 12), while the FPGA pairs balls WITHIN a row, so a lane's
+    // two balls are not an FPGA pair and are not length matched. That is fine
+    // at a 25 MHz pixel clock, and it is why JB is the header to use: JC has
+    // only two of the four lanes on true pairs and JD has none.
+    //
+    // Lane order matches the display's `gpdi` bus: 0 blue, 1 green, 2 red,
+    // 3 clock. Polarity comes from the adapter schematic, which puts the MINUS
+    // side of every lane on header pins 1 to 4 and the PLUS side on 7 to 10.
+    // TMDS reads the difference between the two pins, so swapping them inverts
+    // the bits and 8b/10b decoding fails. Swapping every lane does not cancel.
+    //
+    // No drive strength is set. The iCESugar reference uses DRIVE=4 on Lattice,
+    // but the XDC writer emits PACKAGE_PIN and IOSTANDARD only, so a DRIVE here
+    // would read as if it applied and would not. If the lanes need taming, add
+    // it to the XDC writer first, and check that nextpnr-xilinx accepts it.
+    //
+    // Sites from the Digilent Arty-S7-50 master XDC (JB1=P17 JB2=P18 JB3=R18
+    // JB4=T18, JB7=P14 JB8=P15 JB9=N15 JB10=P16), all bank 14.
+    'gpdi_dp[0]': 'N15 LVCMOS33', // blue +, header pin 9
+    'gpdi_dp[1]': 'P15 LVCMOS33', // green +, header pin 8
+    'gpdi_dp[2]': 'P14 LVCMOS33', // red +, header pin 7
+    'gpdi_dp[3]': 'P16 LVCMOS33', // clock +, header pin 10
+    'gpdi_dn[0]': 'R18 LVCMOS33', // blue -, header pin 3
+    'gpdi_dn[1]': 'P18 LVCMOS33', // green -, header pin 2
+    'gpdi_dn[2]': 'P17 LVCMOS33', // red -, header pin 1
+    'gpdi_dn[3]': 'T18 LVCMOS33', // clock -, header pin 4
+    // DDR3L (Micron MT41K128M16, 256 MB, x16). Address a[13:0] gives 14 row
+    // lines. Lane 0 is DM0/DQS0 with DQ[7:0], lane 1 is DM1/DQS1 with
+    // DQ[15:8], in litex site order.
+    //
+    // Both DQS rails are constrained. The PHY always drives the _n rail, so
+    // leaving it out fails place-and-route with "no IOSTANDARD" rather than
+    // falling back to a generated complement.
+    'sdram_ck': 'R5 DIFF_SSTL135',
+    'sdram_ck_n': 'T4 DIFF_SSTL135',
+    'sdram_cke': 'T2 SSTL135',
+    'sdram_cs_n': 'R3 SSTL135',
+    'sdram_ras_n': 'U1 SSTL135',
+    'sdram_cas_n': 'V3 SSTL135',
+    'sdram_we_n': 'P7 SSTL135',
+    'sdram_odt': 'P5 SSTL135',
+    'sdram_reset_n': 'J6 SSTL135',
+    'sdram_ba[0]': 'V5 SSTL135',
+    'sdram_ba[1]': 'T1 SSTL135',
+    'sdram_ba[2]': 'U3 SSTL135',
+    'sdram_addr[0]': 'U2 SSTL135',
+    'sdram_addr[1]': 'R4 SSTL135',
+    'sdram_addr[2]': 'V2 SSTL135',
+    'sdram_addr[3]': 'V4 SSTL135',
+    'sdram_addr[4]': 'T3 SSTL135',
+    'sdram_addr[5]': 'R7 SSTL135',
+    'sdram_addr[6]': 'V6 SSTL135',
+    'sdram_addr[7]': 'T6 SSTL135',
+    'sdram_addr[8]': 'U7 SSTL135',
+    'sdram_addr[9]': 'V7 SSTL135',
+    'sdram_addr[10]': 'P6 SSTL135',
+    'sdram_addr[11]': 'T5 SSTL135',
+    'sdram_addr[12]': 'R6 SSTL135',
+    'sdram_addr[13]': 'U6 SSTL135',
+    'sdram_dm[0]': 'K4 SSTL135',
+    'sdram_dm[1]': 'M3 SSTL135',
+    'sdram_dq[0]': 'K2 SSTL135',
+    'sdram_dq[1]': 'K3 SSTL135',
+    'sdram_dq[2]': 'L4 SSTL135',
+    'sdram_dq[3]': 'M6 SSTL135',
+    'sdram_dq[4]': 'K6 SSTL135',
+    'sdram_dq[5]': 'M4 SSTL135',
+    'sdram_dq[6]': 'L5 SSTL135',
+    'sdram_dq[7]': 'L6 SSTL135',
+    'sdram_dq[8]': 'N4 SSTL135',
+    'sdram_dq[9]': 'R1 SSTL135',
+    'sdram_dq[10]': 'N1 SSTL135',
+    'sdram_dq[11]': 'N5 SSTL135',
+    'sdram_dq[12]': 'M2 SSTL135',
+    'sdram_dq[13]': 'P1 SSTL135',
+    'sdram_dq[14]': 'M1 SSTL135',
+    'sdram_dq[15]': 'P2 SSTL135',
+    'sdram_dqs[0]': 'K1 SSTL135',
+    'sdram_dqs[1]': 'N3 SSTL135',
+    'sdram_dqs_n[0]': 'L1 SSTL135',
+    'sdram_dqs_n[1]': 'N2 SSTL135',
+  },
+  // Pmod headers as SPI connectors, wired to the Digilent Pmod-SPI (Type 2A)
+  // convention: connector pin 1 = ~CS, 2 = MOSI, 3 = MISO, 4 = SCK. A device
+  // with `iface=pmod@ja` (e.g. a PmodSD SD card in SPI mode) binds its pads
+  // here. MISO gets a PULLUP so an empty socket reads high, not floating.
+  // Sites from the Digilent Arty-S7-50 master XDC (JA1=L17 JA2=L18 JA3=M14
+  // JA4=N14; JB1=P17 JB2=P18 JB3=R18 JB4=T18), all bank 14 LVCMOS33.
+  interfaces: {
+    'pmod@ja': {
+      'cs': 'L17 LVCMOS33',
+      'mosi': 'L18 LVCMOS33',
+      'miso': 'M14 LVCMOS33 PULLUP TRUE',
+      'sck': 'N14 LVCMOS33',
+    },
+    'pmod@jb': {
+      'cs': 'P17 LVCMOS33',
+      'mosi': 'P18 LVCMOS33',
+      'miso': 'R18 LVCMOS33 PULLUP TRUE',
+      'sck': 'T18 LVCMOS33',
+    },
   },
 );

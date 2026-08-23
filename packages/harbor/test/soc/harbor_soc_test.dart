@@ -80,6 +80,25 @@ void main() {
       expect(dts, contains('sifive,plic-1.0.0'));
     });
 
+    test('renders a boolean property as a bare DTS flag', () {
+      final soc = HarborSoC(
+        name: 'BoolSoC',
+        compatible: 'test,soc-v1',
+        busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
+        cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
+      );
+      // The DMA-enabled SPI controller emits a `harbor,dma` boolean property.
+      soc.addPeripheral(
+        HarborSpiController(baseAddress: 0x10001000, dma: true),
+      );
+
+      final dts = soc.generateDts();
+      // A DTS boolean is the bare property name; `harbor,dma = ;` is invalid
+      // DTS and dtc rejects it (this was the bug).
+      expect(dts, contains('harbor,dma;'));
+      expect(dts, isNot(contains('harbor,dma = ')));
+    });
+
     test('generates SVD', () {
       final soc = HarborSoC(
         name: 'TestSoC',
@@ -401,8 +420,14 @@ void main() {
       final result = switch (target) {
         HarborFpgaTarget() => 'fpga',
         HarborAsicTarget() => 'asic',
+        HarborSimTarget() => 'sim',
       };
       expect(result, equals('fpga'));
+      expect(switch (const HarborSimTarget() as HarborDeviceTarget) {
+        HarborFpgaTarget() => 'fpga',
+        HarborAsicTarget() => 'asic',
+        HarborSimTarget() => 'sim',
+      }, equals('sim'));
     });
   });
 }

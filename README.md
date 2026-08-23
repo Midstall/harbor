@@ -46,7 +46,7 @@ A composable, declarative framework for building RISC-V SoCs using [ROHD](https:
 16 kernel modules for Linux 7.0:
 
 ```
-harbor_gpio    harbor_spi      harbor_i2c     harbor_sdhci
+harbor_gpio    harbor_spi      harbor_i2c     harbor_sdio
 harbor_dma     harbor_pwm      harbor_wdt     harbor_eth
 harbor_usb     harbor_display  harbor_pmu     harbor_pcie
 harbor_temp    harbor_media    harbor_audio   harbor_efuse

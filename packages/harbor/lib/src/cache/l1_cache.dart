@@ -91,6 +91,17 @@ class HarborL1ICache extends BridgeModule {
   Logic get memValid => input('mem_valid');
   Logic get memRdata => input('mem_rdata');
 
+  /// Instruction page fault from the fetch translation. Asserted with the refill
+  /// response (done, not valid) when the MMU walk faulted. Without it a faulting
+  /// refill leaves the fill FSM stalled forever, since it only completes on
+  /// done AND valid.
+  Logic get memFault => input('mem_fault');
+
+  /// Fetch page fault to the pipeline. Held with resp done AND not valid for the
+  /// faulting request, so the FetchUnit raises an instruction page fault instead
+  /// of the cache hanging on a fill that can never complete.
+  Logic get respFault => output('resp_fault');
+
   HarborL1ICache({
     required this.config,
     this.xlen = 64,
@@ -117,6 +128,7 @@ class HarborL1ICache extends BridgeModule {
     createPort('flush', PortDirection.input);
     addOutput('resp_data', width: xlen);
     addOutput('resp_valid');
+    addOutput('resp_fault');
     addOutput('miss');
     if (dualPort) {
       createPort('req_addr1', PortDirection.input, width: xlen);
@@ -130,6 +142,7 @@ class HarborL1ICache extends BridgeModule {
     createPort('mem_done', PortDirection.input);
     createPort('mem_valid', PortDirection.input);
     createPort('mem_rdata', PortDirection.input, width: xlen);
+    createPort('mem_fault', PortDirection.input);
 
     final clk = input('clk');
     final reset = input('reset');
@@ -168,7 +181,23 @@ class HarborL1ICache extends BridgeModule {
       (i) => Logic(name: 'tag_$i', width: tagBits),
     );
 
+    // Balanced mux tree (log2(numLines) deep) when the line count is a power of
+    // two; see the matching helper in HarborL1DCache. Replaces a numLines-deep
+    // linear priority chain that was the core's FPGA timing-critical path.
     Logic muxLine(List<Logic> arr, Logic idx) {
+      if (numLines > 1 && (numLines & (numLines - 1)) == 0) {
+        var level = List<Logic>.from(arr);
+        var bit = 0;
+        while (level.length > 1) {
+          final next = <Logic>[];
+          for (var i = 0; i < level.length; i += 2) {
+            next.add(mux(idx[bit], level[i + 1], level[i]));
+          }
+          level = next;
+          bit++;
+        }
+        return level[0];
+      }
       var r = arr[0];
       for (var i = 1; i < numLines; i++) {
         r = mux(idx.eq(i), arr[i], r);
@@ -217,6 +246,13 @@ class HarborL1ICache extends BridgeModule {
       width: (offBits == 0 ? 1 : offBits) + 1,
     );
 
+    // Fetch-fault latch: set when a refill returns a page fault (mem_fault), held
+    // until the requesting fetch retargets (the pipeline trapped and redirected).
+    // While set for [faultAddr] it suppresses a fresh fill of that same line, so
+    // the miss does not loop fill -> fault -> fill.
+    final faultResp = Logic(name: 'faultResp');
+    final faultAddr = Logic(name: 'faultAddr', width: xlen);
+
     // One-cycle-delayed copy of the request address: the block-RAM read launched
     // last cycle answers this cycle, so hit detection compares against it.
     final addrQ = Logic(name: 'addrQ', width: xlen);
@@ -239,9 +275,14 @@ class HarborL1ICache extends BridgeModule {
     final miss1 = dualPort
         ? (ans1 & ~committedHit(addrQ1!) & ~blockHit).named('miss1')
         : Const(0);
+    // The faulting fetch is held by the FetchUnit at [faultAddr]; do not restart a
+    // fill for it (it would just fault again), let respFault deliver the fault.
+    final faultHeld = (faultResp & reqValid & reqAddr.eq(faultAddr)).named(
+      'faultHeld',
+    );
     // Port 0 has priority for starting a fill, fill from the missing port's held
     // (registered) address.
-    final wantFill = (miss0 | miss1).named('wantFill');
+    final wantFill = ((miss0 | miss1) & ~faultHeld).named('wantFill');
     final fillAddr = mux(miss0, addrQ, dualPort ? addrQ1! : addrQ);
 
     final fillLineBase =
@@ -255,6 +296,11 @@ class HarborL1ICache extends BridgeModule {
 
     respData <= dataRam.readData(0);
     respValid <= hit;
+    // A faulting fetch presents as done (in core.dart: done = respValid |
+    // respFault) with valid low, so the FetchUnit raises the instruction page
+    // fault instead of retrying. Gated to the held request so a stale latch never
+    // faults an unrelated fetch.
+    respFault <= faultHeld;
     miss <= miss0;
     if (dualPort) {
       respData1 <= dataRam.readData(1);
@@ -288,6 +334,7 @@ class HarborL1ICache extends BridgeModule {
           fillSettle < 0,
           memEnR < 0,
           drain < 0,
+          faultResp < 0,
         ],
         orElse: [
           If(
@@ -297,6 +344,7 @@ class HarborL1ICache extends BridgeModule {
               filling < 0,
               fillSettle < 0,
               memEnR < 0,
+              faultResp < 0,
               // If a refill read is still outstanding to the MMU (filling, or
               // already draining a prior flush), keep draining until its stale
               // completion arrives, unless it completes this very cycle.
@@ -304,12 +352,16 @@ class HarborL1ICache extends BridgeModule {
             ],
             orElse: [
               fillSettle < 0,
+              // The pipeline trapped on the fault and redirected the fetch, so the
+              // held request retargeted; drop the latch so a later miss can fill.
+              If(faultResp & ~faultHeld, then: [faultResp < 0]),
               If(
                 drain,
                 then: [
                   // Waiting out the abandoned read. filling is 0 so its
-                  // completion is never written; just release once it lands.
-                  If(memDone & memValid, then: [drain < 0]),
+                  // completion is never written; just release once it lands
+                  // (data or fault, so a faulting stale read cannot hang drain).
+                  If(memDone, then: [drain < 0]),
                 ],
                 orElse: [
                   If(
@@ -344,6 +396,16 @@ class HarborL1ICache extends BridgeModule {
                             ],
                           ),
                         ],
+                        // done AND not valid: the MMU fetch walk page-faulted
+                        // (mem_fault). Stop the fill (never mark the line valid)
+                        // and latch the fault so respFault delivers it to the
+                        // pipeline. Without this the fill FSM stalls forever.
+                        orElse: [
+                          If(
+                            memDone,
+                            then: [memEnR < 0, filling < 0, faultResp < 1],
+                          ),
+                        ],
                       ),
                     ],
                     orElse: [
@@ -357,6 +419,11 @@ class HarborL1ICache extends BridgeModule {
                           fillWord < 0,
                           memEnR < 1,
                           memAddrR < fillLineBase,
+                          // Remember the exact request address this fill serves;
+                          // if it faults, respFault is gated to a held request at
+                          // this address so a stale latch never faults another
+                          // fetch.
+                          faultAddr < fillAddr,
                         ],
                       ),
                     ],
@@ -496,7 +563,25 @@ class HarborL1DCache extends BridgeModule {
       (i) => Logic(name: 'tag_$i', width: tagBits),
     );
 
+    // Select arr[idx]. A balanced mux tree (log2(numLines) deep) when the line
+    // count is a power of two, folding pairs on one index bit per level. The
+    // old linear `mux(idx.eq(i), arr[i], r)` chain was numLines muxes deep and,
+    // run twice (valid + tag) into the tag compare, was the core's FPGA timing-
+    // critical path. Falls back to the linear form for a non-power-of-two count.
     Logic muxLine(List<Logic> arr, Logic idx) {
+      if (numLines > 1 && (numLines & (numLines - 1)) == 0) {
+        var level = List<Logic>.from(arr);
+        var bit = 0;
+        while (level.length > 1) {
+          final next = <Logic>[];
+          for (var i = 0; i < level.length; i += 2) {
+            next.add(mux(idx[bit], level[i + 1], level[i]));
+          }
+          level = next;
+          bit++;
+        }
+        return level[0];
+      }
       var r = arr[0];
       for (var i = 1; i < numLines; i++) {
         r = mux(idx.eq(i), arr[i], r);
@@ -763,7 +848,16 @@ class HarborL1DCache extends BridgeModule {
                                       filling < 1,
                                       memEnR < 1,
                                       memWeR < 0,
-                                      memSizeR < Const(2, width: 3),
+                                      // Read a FULL word per fill beat. wordBytes
+                                      // is 8 on RV64, so the size must be 3 (8
+                                      // bytes), not a hardcoded 2 (4 bytes) which
+                                      // left the upper half of every 64-bit line
+                                      // word undefined.
+                                      memSizeR <
+                                          Const(
+                                            wordBytes.bitLength - 1,
+                                            width: 3,
+                                          ),
                                       fillIdx < idxOf(addrQ),
                                       fillTag < tagOf(addrQ),
                                       fillBase < fillLineBase,

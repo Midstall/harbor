@@ -4,19 +4,20 @@ import 'package:harbor/harbor.dart';
 import 'package:rohd/rohd.dart';
 import 'package:test/test.dart';
 
-// EP0 register word indices (address bit 8 set).
-const _ep0Ctrl = 0x100;
-const _ep0TxData = 0x103;
-const _ep0TxLen = 0x105;
-const _ep0RxLen = 0x110;
-const _ep0RxData = 0x111;
-const _hostToken = 0x120;
-const _hostStatus = 0x121;
+// EP0 register BYTE offsets. The EP0 block is the second 512-byte page
+// (address bit 9 set), and each register is its own 8-byte slot.
+const _ep0Ctrl = 0x200;
+const _ep0TxData = 0x218;
+const _ep0TxLen = 0x228;
+const _ep0RxLen = 0x280;
+const _ep0RxData = 0x288;
+const _hostToken = 0x300;
+const _hostStatus = 0x308;
 
-// Global register word indices.
-const _ctrl = 0x000;
-const _status = 0x001;
-const _intStatus = 0x003;
+// Global register BYTE offsets.
+const _ctrl = 0x00;
+const _status = 0x08;
+const _intStatus = 0x18;
 
 // USB CRC16: reflected poly 0xA001, init 0xFFFF, processed LSB first per byte.
 int _crc16(List<int> bytes) {

@@ -2,28 +2,34 @@
 /*
  * Harbor PWM/Timer driver
  *
- * Per-channel registers (0x10 + ch*0x10):
- *   +0x00: CTRL     +0x04: COUNT    +0x08: COMPARE   +0x0C: DUTY
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour.
  *
- * Global: 0x00: GLOBAL_CTRL  0x04: INT_STATUS
+ * Per-channel registers (0x20 + ch*0x20):
+ *   +0x00: CTRL     +0x08: COUNT    +0x10: COMPARE   +0x18: DUTY
+ *
+ * Global: 0x00: GLOBAL_CTRL  0x08: INT_STATUS
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/pwm.h>
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/clk.h>
 
 #define HARBOR_PWM_GLOBAL_CTRL 0x00
-#define HARBOR_PWM_INT_STATUS  0x04
-#define HARBOR_PWM_CH_BASE     0x10
-#define HARBOR_PWM_CH_STRIDE   0x10
+#define HARBOR_PWM_INT_STATUS  0x08
+#define HARBOR_PWM_CH_BASE     0x20
+#define HARBOR_PWM_CH_STRIDE   0x20
 
 #define HARBOR_PWM_CH_CTRL    0x00
-#define HARBOR_PWM_CH_COUNT   0x04
-#define HARBOR_PWM_CH_COMPARE 0x08
-#define HARBOR_PWM_CH_DUTY    0x0C
+#define HARBOR_PWM_CH_COUNT   0x08
+#define HARBOR_PWM_CH_COMPARE 0x10
+#define HARBOR_PWM_CH_DUTY    0x18
 
 struct harbor_pwm {
 	void __iomem *base;
@@ -94,7 +100,7 @@ static int harbor_pwm_probe(struct platform_device *pdev)
 	struct clk *clk;
 	u32 num_channels = 4;
 
-	of_property_read_u32(pdev->dev.of_node, "num-channels", &num_channels);
+	device_property_read_u32(&pdev->dev, "num-channels", &num_channels);
 
 	chip = devm_pwmchip_alloc(&pdev->dev, num_channels, sizeof(*hp));
 	if (IS_ERR(chip))

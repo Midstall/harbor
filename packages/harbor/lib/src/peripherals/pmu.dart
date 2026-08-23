@@ -76,15 +76,17 @@ class HarborPmuConfig with HarborPrettyString {
 /// Controls power domains, voltage regulators, and system power
 /// states. Supports domain power gating and retention.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: CTRL         (global enable, system sleep mode)
-/// - 0x04: STATUS       (current system power state)
-/// - 0x08: WAKEUP_EN    (wakeup source enable mask)
-/// - 0x0C: WAKEUP_STATUS (which source triggered wakeup, W1C)
-/// - Per-domain (0x40 + domain*0x10):
+/// - 0x08: STATUS       (current system power state)
+/// - 0x10: WAKEUP_EN    (wakeup source enable mask)
+/// - 0x18: WAKEUP_STATUS (which source triggered wakeup, W1C)
+/// - Per-domain (0x40 + domain*0x20):
 ///   - +0x00: DOM_CTRL   (target state: off/retention/on)
-///   - +0x04: DOM_STATUS (current state, transition busy)
-///   - +0x08: DOM_ISO    (isolation control)
+///   - +0x08: DOM_STATUS (current state, transition busy)
+///   - +0x10: DOM_ISO    (isolation control)
 class HarborPowerManagementUnit extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -111,6 +113,15 @@ class HarborPowerManagementUnit extends BridgeModule
     BusProtocol protocol = BusProtocol.wishbone,
     String? name,
   }) : super('PMU', name: name ?? 'pmu') {
+    // Domain d decodes at 0x40 + d*0x20 inside the 4 KiB register window, so
+    // domain 126 would wrap past the window and alias domain 0. Refuse to build
+    // rather than silently overlap two domains' registers.
+    if (config.domains.length > 126) {
+      throw ArgumentError(
+        'HarborPowerManagementUnit: at most 126 power domains fit the 4 KiB '
+        'register window (got ${config.domains.length}).',
+      );
+    }
     createPort('clk', PortDirection.input);
     createPort('reset', PortDirection.input);
     addOutput('interrupt');
@@ -124,7 +135,7 @@ class HarborPowerManagementUnit extends BridgeModule
       module: this,
       name: 'bus',
       protocol: protocol,
-      addressWidth: 8,
+      addressWidth: 12,
       dataWidth: 32,
     );
 
@@ -191,10 +202,10 @@ class HarborPowerManagementUnit extends BridgeModule
 
               // Global registers
               If(
-                bus.addr.getRange(6, 8).eq(Const(0, width: 2)),
+                bus.addr.getRange(6, 12).eq(Const(0, width: 6)),
                 then: [
-                  Case(bus.addr.getRange(0, 2), [
-                    CaseItem(Const(0, width: 2), [
+                  Case(bus.addr.getRange(0, 5), [
+                    CaseItem(Const(0x00, width: 5), [
                       If(
                         bus.we,
                         then: [
@@ -209,17 +220,17 @@ class HarborPowerManagementUnit extends BridgeModule
                         ],
                       ),
                     ]),
-                    CaseItem(Const(1, width: 2), [
+                    CaseItem(Const(0x08, width: 5), [
                       bus.dataOut < sleepMode.zeroExtend(32),
                     ]),
-                    CaseItem(Const(2, width: 2), [
+                    CaseItem(Const(0x10, width: 5), [
                       If(
                         bus.we,
                         then: [wakeupEn < bus.dataIn.getRange(0, 8)],
                         orElse: [bus.dataOut < wakeupEn.zeroExtend(32)],
                       ),
                     ]),
-                    CaseItem(Const(3, width: 2), [
+                    CaseItem(Const(0x18, width: 5), [
                       If(
                         bus.we,
                         then: [
@@ -233,26 +244,28 @@ class HarborPowerManagementUnit extends BridgeModule
                 ],
               ),
 
-              // Per-domain registers (0x40 + domain*0x10)
+              // Per-domain registers (0x40 + domain*0x20). The stride is 0x20,
+              // not 0x10: three 8-byte slots no longer fit in 16 bytes, and a
+              // 0x10 stride put DOM_ISO on the next domain's DOM_CTRL.
               for (var d = 0; d < domainCount; d++)
                 If(
-                  bus.addr.getRange(4, 8).eq(Const(4 + d, width: 4)),
+                  bus.addr.getRange(5, 12).eq(Const(2 + d, width: 7)),
                   then: [
-                    Case(bus.addr.getRange(0, 2), [
-                      CaseItem(Const(0, width: 2), [
+                    Case(bus.addr.getRange(0, 5), [
+                      CaseItem(Const(0x00, width: 5), [
                         If(
                           bus.we,
                           then: [domTarget[d] < bus.dataIn.getRange(0, 2)],
                           orElse: [bus.dataOut < domTarget[d].zeroExtend(32)],
                         ),
                       ]),
-                      CaseItem(Const(1, width: 2), [
+                      CaseItem(Const(0x08, width: 5), [
                         bus.dataOut <
                             domState[d].zeroExtend(32) |
                                 (domState[d].neq(domTarget[d]).zeroExtend(32) <<
                                     Const(8, width: 32)),
                       ]),
-                      CaseItem(Const(2, width: 2), [
+                      CaseItem(Const(0x10, width: 5), [
                         If(
                           bus.we,
                           then: [domIso[d] < bus.dataIn[0]],

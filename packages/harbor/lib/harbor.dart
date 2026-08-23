@@ -301,6 +301,7 @@ export 'src/media/wiener_filter.dart';
 // Debug / JTAG
 export 'src/debug/debug_module.dart';
 export 'src/debug/debug_transport.dart';
+export 'src/debug/jtag_bscan_tunnel.dart';
 export 'src/debug/jtag_interface.dart';
 export 'src/debug/jtag_remote.dart';
 export 'src/debug/jtag_tap.dart';
@@ -320,6 +321,7 @@ export 'src/peripherals/clint.dart';
 export 'src/peripherals/crypto.dart';
 export 'src/peripherals/ddr.dart';
 export 'src/peripherals/ddr3_burst_adapter.dart';
+export 'src/peripherals/ddr3_gearbox.dart';
 export 'src/peripherals/harbor_ddr3.dart';
 export 'src/peripherals/ddr_read_assembler.dart';
 export 'src/peripherals/ddr_xilinx_read_train.dart';

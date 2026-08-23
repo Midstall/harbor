@@ -16,7 +16,12 @@ void main() {
     shiftClk = SimpleClockGenerator(10).clk;
     reset = Logic(name: 'reset');
     symbol = Logic(name: 'symbol', width: 10);
-    ser = TmdsSerializer(shiftClk: shiftClk, reset: reset, symbol: symbol);
+    ser = TmdsSerializer(
+      shiftClk: shiftClk,
+      reset: reset,
+      symbol: symbol,
+      target: const HarborSimTarget(),
+    );
     await ser.build();
     reset.inject(1);
     symbol.inject(0);

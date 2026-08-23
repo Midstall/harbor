@@ -9,7 +9,7 @@ Out-of-tree Linux kernel drivers for Harbor SoC peripherals.
 | `harbor_gpio` | `harbor,gpio` | GPIO controller with IRQ support |
 | `harbor_spi` | `harbor,spi` | SPI master controller |
 | `harbor_i2c` | `harbor,i2c` | I2C master controller |
-| `harbor_sdhci` | `harbor,sdhci` | SD/SDIO/eMMC host controller |
+| `harbor_sdio` | `harbor,sdio`, `harbor,sdhci` | SD/SDIO/eMMC host controller (ADMA) |
 
 ## Peripherals with upstream Linux support
 

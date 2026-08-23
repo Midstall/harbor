@@ -86,30 +86,32 @@ enum HarborAudioCodecFormat {
 /// - **DMA engine**: Ring buffer for playback/capture
 /// - **Audio codec**: Optional hardware encode/decode (AAC, Opus, etc.)
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: CTRL         (enable, interface select, master/slave)
-/// - 0x04: STATUS       (tx fifo level, rx fifo level, underrun, overrun)
-/// - 0x08: CLK_CFG      (MCLK divider, BCLK divider, LRCLK divider)
-/// - 0x0C: FORMAT       (sample format, channels, bit width, justification)
-/// - 0x10: TX_CTRL      (tx enable, tx DMA enable, tx fifo threshold)
-/// - 0x14: RX_CTRL      (rx enable, rx DMA enable, rx fifo threshold)
-/// - 0x18: TX_DMA_ADDR  (tx ring buffer base address)
-/// - 0x1C: TX_DMA_SIZE  (tx ring buffer size)
-/// - 0x20: TX_DMA_WR    (tx write pointer, updated by software)
-/// - 0x24: TX_DMA_RD    (tx read pointer, updated by hardware, read-only)
-/// - 0x28: RX_DMA_ADDR  (rx ring buffer base address)
-/// - 0x2C: RX_DMA_SIZE  (rx ring buffer size)
-/// - 0x30: RX_DMA_WR    (rx write pointer, updated by hardware, read-only)
-/// - 0x34: RX_DMA_RD    (rx read pointer, updated by software)
-/// - 0x38: INT_STATUS   (W1C: tx empty, tx threshold, rx full, rx threshold,
+/// - 0x08: STATUS       (tx fifo level, rx fifo level, underrun, overrun)
+/// - 0x10: CLK_CFG      (MCLK divider, BCLK divider, LRCLK divider)
+/// - 0x18: FORMAT       (sample format, channels, bit width, justification)
+/// - 0x20: TX_CTRL      (tx enable, tx DMA enable, tx fifo threshold)
+/// - 0x28: RX_CTRL      (rx enable, rx DMA enable, rx fifo threshold)
+/// - 0x30: TX_DMA_ADDR  (tx ring buffer base address)
+/// - 0x38: TX_DMA_SIZE  (tx ring buffer size)
+/// - 0x40: TX_DMA_WR    (tx write pointer, updated by software)
+/// - 0x48: TX_DMA_RD    (tx read pointer, updated by hardware, read-only)
+/// - 0x50: RX_DMA_ADDR  (rx ring buffer base address)
+/// - 0x58: RX_DMA_SIZE  (rx ring buffer size)
+/// - 0x60: RX_DMA_WR    (rx write pointer, updated by hardware, read-only)
+/// - 0x68: RX_DMA_RD    (rx read pointer, updated by software)
+/// - 0x70: INT_STATUS   (W1C: tx empty, tx threshold, rx full, rx threshold,
 ///                        underrun, overrun, codec done)
-/// - 0x3C: INT_ENABLE   (interrupt enable mask)
-/// - 0x40: VOLUME_L     (left channel volume, 0-255)
-/// - 0x44: VOLUME_R     (right channel volume, 0-255)
-/// - 0x48: MUTE         (bit 0: tx mute, bit 1: rx mute)
-/// - 0x80: CODEC_CTRL   (codec select, start, direction)
-/// - 0x84: CODEC_STATUS  (codec busy/done/error)
-/// - 0x88: CODEC_CAPS   (supported codecs bitmask, read-only)
+/// - 0x78: INT_ENABLE   (interrupt enable mask)
+/// - 0x80: VOLUME_L     (left channel volume, 0-255)
+/// - 0x88: VOLUME_R     (right channel volume, 0-255)
+/// - 0x90: MUTE         (bit 0: tx mute, bit 1: rx mute)
+/// - 0x100: CODEC_CTRL   (codec select, start, direction)
+/// - 0x108: CODEC_STATUS  (codec busy/done/error)
+/// - 0x110: CODEC_CAPS   (supported codecs bitmask, read-only)
 class HarborAudioController extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -229,7 +231,7 @@ class HarborAudioController extends BridgeModule
       module: this,
       name: 'bus',
       protocol: protocol,
-      addressWidth: 8,
+      addressWidth: 12,
       dataWidth: 32,
     );
 
@@ -343,84 +345,84 @@ class HarborAudioController extends BridgeModule
             bus.stb & ~bus.ack,
             then: [
               bus.ack < Const(1),
-              Case(bus.addr.getRange(0, 7), [
-                CaseItem(Const(0x00, width: 7), [
+              Case(bus.addr.getRange(0, 9), [
+                CaseItem(Const(0x00, width: 9), [
                   If(
                     bus.we,
                     then: [ctrl < bus.dataIn],
                     orElse: [bus.dataOut < ctrl],
                   ),
                 ]),
-                CaseItem(Const(0x04 >> 2, width: 7), [
+                CaseItem(Const(0x08, width: 9), [
                   // STATUS: read-only
                   bus.dataOut < Const(0, width: 32), // placeholder
                 ]),
-                CaseItem(Const(0x08 >> 2, width: 7), [
+                CaseItem(Const(0x10, width: 9), [
                   If(
                     bus.we,
                     then: [clkCfg < bus.dataIn],
                     orElse: [bus.dataOut < clkCfg],
                   ),
                 ]),
-                CaseItem(Const(0x0C >> 2, width: 7), [
+                CaseItem(Const(0x18, width: 9), [
                   If(
                     bus.we,
                     then: [format < bus.dataIn],
                     orElse: [bus.dataOut < format],
                   ),
                 ]),
-                CaseItem(Const(0x10 >> 2, width: 7), [
+                CaseItem(Const(0x20, width: 9), [
                   If(
                     bus.we,
                     then: [txCtrl < bus.dataIn],
                     orElse: [bus.dataOut < txCtrl],
                   ),
                 ]),
-                CaseItem(Const(0x14 >> 2, width: 7), [
+                CaseItem(Const(0x28, width: 9), [
                   If(
                     bus.we,
                     then: [rxCtrl < bus.dataIn],
                     orElse: [bus.dataOut < rxCtrl],
                   ),
                 ]),
-                CaseItem(Const(0x18 >> 2, width: 7), [
+                CaseItem(Const(0x30, width: 9), [
                   If(
                     bus.we,
                     then: [txDmaAddr < bus.dataIn],
                     orElse: [bus.dataOut < txDmaAddr],
                   ),
                 ]),
-                CaseItem(Const(0x1C >> 2, width: 7), [
+                CaseItem(Const(0x38, width: 9), [
                   If(
                     bus.we,
                     then: [txDmaSize < bus.dataIn],
                     orElse: [bus.dataOut < txDmaSize],
                   ),
                 ]),
-                CaseItem(Const(0x20 >> 2, width: 7), [
+                CaseItem(Const(0x40, width: 9), [
                   If(
                     bus.we,
                     then: [txDmaWr < bus.dataIn],
                     orElse: [bus.dataOut < txDmaWr],
                   ),
                 ]),
-                CaseItem(Const(0x24 >> 2, width: 7), [bus.dataOut < txDmaRd]),
-                CaseItem(Const(0x28 >> 2, width: 7), [
+                CaseItem(Const(0x48, width: 9), [bus.dataOut < txDmaRd]),
+                CaseItem(Const(0x50, width: 9), [
                   If(
                     bus.we,
                     then: [rxDmaAddr < bus.dataIn],
                     orElse: [bus.dataOut < rxDmaAddr],
                   ),
                 ]),
-                CaseItem(Const(0x2C >> 2, width: 7), [
+                CaseItem(Const(0x58, width: 9), [
                   If(
                     bus.we,
                     then: [rxDmaSize < bus.dataIn],
                     orElse: [bus.dataOut < rxDmaSize],
                   ),
                 ]),
-                CaseItem(Const(0x30 >> 2, width: 7), [bus.dataOut < rxDmaWr]),
-                CaseItem(Const(0x34 >> 2, width: 7), [
+                CaseItem(Const(0x60, width: 9), [bus.dataOut < rxDmaWr]),
+                CaseItem(Const(0x68, width: 9), [
                   If(
                     bus.we,
                     then: [rxDmaRd < bus.dataIn],
@@ -428,7 +430,7 @@ class HarborAudioController extends BridgeModule
                   ),
                 ]),
                 // INT_STATUS (W1C)
-                CaseItem(Const(0x38 >> 2, width: 7), [
+                CaseItem(Const(0x70, width: 9), [
                   If(
                     bus.we,
                     then: [
@@ -438,7 +440,7 @@ class HarborAudioController extends BridgeModule
                   ),
                 ]),
                 // INT_ENABLE
-                CaseItem(Const(0x3C >> 2, width: 7), [
+                CaseItem(Const(0x78, width: 9), [
                   If(
                     bus.we,
                     then: [intEnable < bus.dataIn.getRange(0, 8)],
@@ -446,7 +448,7 @@ class HarborAudioController extends BridgeModule
                   ),
                 ]),
                 // VOLUME_L
-                CaseItem(Const(0x40 >> 2, width: 7), [
+                CaseItem(Const(0x80, width: 9), [
                   If(
                     bus.we,
                     then: [volumeL < bus.dataIn.getRange(0, 8)],
@@ -454,7 +456,7 @@ class HarborAudioController extends BridgeModule
                   ),
                 ]),
                 // VOLUME_R
-                CaseItem(Const(0x44 >> 2, width: 7), [
+                CaseItem(Const(0x88, width: 9), [
                   If(
                     bus.we,
                     then: [volumeR < bus.dataIn.getRange(0, 8)],
@@ -462,7 +464,7 @@ class HarborAudioController extends BridgeModule
                   ),
                 ]),
                 // MUTE
-                CaseItem(Const(0x48 >> 2, width: 7), [
+                CaseItem(Const(0x90, width: 9), [
                   If(
                     bus.we,
                     then: [muteReg < bus.dataIn.getRange(0, 2)],
@@ -470,7 +472,7 @@ class HarborAudioController extends BridgeModule
                   ),
                 ]),
                 // CODEC_CAPS
-                CaseItem(Const(0x88 >> 2, width: 7), [
+                CaseItem(Const(0x110, width: 9), [
                   bus.dataOut < Const(codecCaps, width: 32),
                 ]),
               ]),

@@ -1,3 +1,4 @@
+import '../debug/jtag_remote.dart' show JtagRemote;
 import '../pdk/io_ring.dart';
 import '../pdk/klayout.dart';
 import '../pdk/pdk_provider.dart';
@@ -200,6 +201,12 @@ class HarborFpgaTarget extends HarborDeviceTarget {
         buf.writeln('synth_ecp5 -top $topCell -json $topCell.json');
       case HarborFpgaVendor.vivado:
       case HarborFpgaVendor.openXc7:
+        // NOTE: -nowidelut (wide muxes as LUT trees, not MUXF7/8 carry chains)
+        // de-congests the ddr_clk 8-bank select mux (s2_bank -> MUXF7/MUXF8 tree
+        // -> command flop, the 56 MHz path while ddr_clk is driven at 75), but it
+        // has caused unrelated issues before, so it is NOT used here. De-congest
+        // that path a targeted way instead (register-duplicate s2_bank with a
+        // synth-flow keep, or floorplan the controller).
         buf.writeln('synth_xilinx -top $topCell -flatten');
         buf.writeln('write_json $topCell.json');
     }
@@ -441,6 +448,50 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     return buf.toString();
   }
 
+  /// Generates the nextpnr-xilinx `--pre-pack` clock over-constraint
+  /// (`support/nextpnr/clocks.py`). nextpnr-xilinx does not propagate the XDC
+  /// `create_clock` through a PLLE2/MMCM or BUFG, so every derived clock (the
+  /// core net `O`, the DDR controller net `ddr_clk`) reaches the timing engine
+  /// UNCONSTRAINED - zero margin, setup-only, single-corner. addClock at a rate
+  /// ABOVE the real one restores a timing budget: it drives timing-aware
+  /// placement/routing to prioritise these paths and surfaces true silicon
+  /// margin as an honest WNS. The core is over-constrained modestly (it already
+  /// runs well under its routing ceiling); the DDR controller carries the larger
+  /// margin because it is far more slack-critical per cycle.
+  String generateClockConstraintPy({
+    required double coreClkMhz,
+    required double ddrCtrlMhz,
+  }) {
+    final coreTarget = (coreClkMhz * 1.4);
+    final ddrTarget = (ddrCtrlMhz * 1.25);
+    final buf = StringBuffer();
+    buf.writeln('# --pre-pack over-constraint for the PLL/BUFG-derived clocks');
+    buf.writeln(
+      '# that nextpnr-xilinx leaves UNCONSTRAINED (create_clock does',
+    );
+    buf.writeln('# not cross the PLL). Targets are ABOVE the real rate for');
+    buf.writeln('# derate margin. Confirm each took: the report must read');
+    buf.writeln(
+      '# "Max frequency for clock \'NAME\': X MHz (... at <target>)".',
+    );
+    buf.writeln('for net, mhz in [');
+    buf.writeln(
+      "    ('O', ${coreTarget.toStringAsFixed(2)}),"
+      '  # core, real ~${coreClkMhz.toStringAsFixed(1)} MHz',
+    );
+    buf.writeln(
+      "    ('ddr_clk', ${ddrTarget.toStringAsFixed(2)}),"
+      '  # DDR controller, real ~${ddrCtrlMhz.toStringAsFixed(1)} MHz',
+    );
+    buf.writeln(']:');
+    buf.writeln('    try:');
+    buf.writeln('        ctx.addClock(net, mhz)');
+    buf.writeln("        print('ADDCLOCK %s -> %.2f MHz' % (net, mhz))");
+    buf.writeln('    except Exception as e:');
+    buf.writeln("        print('ADDCLOCK %s FAILED: %s' % (net, e))");
+    return buf.toString();
+  }
+
   /// Generates the nextpnr-xilinx `--pre-route` BEL-placement diagnostic
   /// (`support/nextpnr/show_bels.py`) for the openXC7 DDR3 flow. It prints
   /// where the train SERDES landed after placement so a bad pin is visible.
@@ -517,6 +568,24 @@ class HarborFpgaTarget extends HarborDeviceTarget {
       buf.writeln('FAMILY = $_prjxrayFamily');
       buf.writeln('SEED ?= 1');
       buf.writeln(
+        '# nextpnr-xilinx has no --threads flag, but it links OpenMP, so the',
+      );
+      buf.writeln(
+        '# thread count is set through OMP_NUM_THREADS on the pnr command below.',
+      );
+      buf.writeln(
+        '# Defaults to all host cores; override with e.g. THREADS=8.',
+      );
+      buf.writeln('THREADS ?= \$(shell nproc)');
+      buf.writeln(
+        '# nextpnr placer: heap (analytical, default) or sa (annealing). heap is',
+      );
+      buf.writeln(
+        '# usually better on dense designs but its legalization is single-'
+        'threaded and slow; sa is an alternative when heap stalls.',
+      );
+      buf.writeln('PLACER ?= heap');
+      buf.writeln(
         '# --pre-place/--pre-route hooks activate only when Harbor emitted the',
       );
       buf.writeln(
@@ -527,13 +596,25 @@ class HarborFpgaTarget extends HarborDeviceTarget {
         '--pre-place support/nextpnr/constraints.py '
         '--pre-route support/nextpnr/show_bels.py,)',
       );
+      buf.writeln(
+        '# --pre-pack over-constrains the PLL/BUFG-derived clocks (which',
+      );
+      buf.writeln(
+        '# nextpnr leaves unconstrained); --timing-allow-fail still writes a',
+      );
+      buf.writeln('# bitstream when the aggressive target is not met.');
+      buf.writeln(
+        'PREPACK := \$(if \$(wildcard support/nextpnr/clocks.py),'
+        '--pre-pack support/nextpnr/clocks.py --timing-allow-fail,)',
+      );
       buf.writeln();
       buf.writeln('pnr: \$(TOP).fasm');
       buf.writeln('\$(TOP).fasm: \$(TOP).json \$(TOP).$constraintExtension');
       buf.writeln(
-        '\tnextpnr-xilinx --chipdb \$(CHIPDB) --xdc \$(TOP).$constraintExtension '
+        '\tOMP_NUM_THREADS=\$(THREADS) nextpnr-xilinx --chipdb \$(CHIPDB) '
+        '--xdc \$(TOP).$constraintExtension '
         '--json \$(TOP).json --write \$(TOP)_routed.json --fasm \$(TOP).fasm '
-        '\$(PREPLACE) --seed \$(SEED)',
+        '\$(PREPACK) \$(PREPLACE) --placer \$(PLACER) --seed \$(SEED)',
       );
       buf.writeln();
       buf.writeln('pack: \$(TOP).$bitstreamExtension');
@@ -573,17 +654,34 @@ class HarborFpgaTarget extends HarborDeviceTarget {
   /// - iCE40: `.pcf` (Physical Constraints File)
   /// - ECP5: `.lpf` (Lattice Preference File)
   /// - Xilinx: `.xdc` (Xilinx Design Constraints)
-  String generateConstraints() {
+  /// [knownPorts] is the set of top-level port base-names the design actually
+  /// has. When given, a [pinMap] entry whose port is not among them is skipped:
+  /// a board defines pins for every connector it carries (e.g. an unused HDMI
+  /// header), but a constraint for a port the netlist does not expose makes the
+  /// place-and-route tool reject the design. When null, every pin is emitted.
+  String generateConstraints({Set<String>? knownPorts}) {
     switch (vendor) {
       case HarborFpgaVendor.ice40:
-        return _generatePcf();
+        return _generatePcf(knownPorts);
       case HarborFpgaVendor.ecp5:
-        return _generateLpf();
+        return _generateLpf(knownPorts);
       case HarborFpgaVendor.vivado:
       case HarborFpgaVendor.openXc7:
-        return _generateXdc();
+        return _generateXdc(knownPorts);
     }
   }
+
+  /// A pin key may carry a bus index (`sdram_dq[0]`); the port it belongs to is
+  /// the base name (`sdram_dq`). Strip the index before checking [knownPorts].
+  static String _portBaseName(String pinKey) {
+    final b = pinKey.indexOf('[');
+    return b < 0 ? pinKey : pinKey.substring(0, b);
+  }
+
+  /// Whether a [pinMap] entry should be emitted: always when [knownPorts] is
+  /// null, else only if the design exposes the pin's port.
+  static bool _emitPin(String pinKey, Set<String>? knownPorts) =>
+      knownPorts == null || knownPorts.contains(_portBaseName(pinKey));
 
   /// A pin map value is the site name, optionally followed by
   /// whitespace-separated IO attributes (e.g. `"C17 SSTL135_I
@@ -594,10 +692,11 @@ class HarborFpgaTarget extends HarborDeviceTarget {
   static List<String> _ioAttrs(String value) =>
       value.trim().split(RegExp(r'\s+')).skip(1).toList();
 
-  String _generatePcf() {
+  String _generatePcf(Set<String>? knownPorts) {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated PCF for $name');
     for (final entry in pinMap.entries) {
+      if (!_emitPin(entry.key, knownPorts)) continue;
       buf.writeln('set_io ${entry.key} ${_site(entry.value)}');
     }
     if (frequency > 0) {
@@ -636,7 +735,7 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     return null;
   }
 
-  String _generateLpf() {
+  String _generateLpf(Set<String>? knownPorts) {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated LPF for $name');
     // Collect the DDR SSTL135 banks (from the DQ/DQS input pins) so each gets a
@@ -645,6 +744,7 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     // (litex/Lattice ECP5 DDR3 lpf always sets it). Deduped, emitted once.
     final ddrBanks = <int>{};
     for (final entry in pinMap.entries) {
+      if (!_emitPin(entry.key, knownPorts)) continue;
       final attrs = _ioAttrs(entry.value);
       final ioType = attrs.where((a) => !a.contains('=')).firstOrNull;
       if (ioType != null && ioType.startsWith('SSTL135')) {
@@ -656,6 +756,7 @@ class HarborFpgaTarget extends HarborDeviceTarget {
       buf.writeln('BANK $bank VCCIO 1.35 V;');
     }
     for (final entry in pinMap.entries) {
+      if (!_emitPin(entry.key, knownPorts)) continue;
       final attrs = _ioAttrs(entry.value);
       // A bare IO type may be given as the first attribute. Anything with
       // an '=' passes through verbatim (TERMINATION, DIFFRESISTOR, ...).
@@ -676,10 +777,11 @@ class HarborFpgaTarget extends HarborDeviceTarget {
     return buf.toString();
   }
 
-  String _generateXdc() {
+  String _generateXdc(Set<String>? knownPorts) {
     final buf = StringBuffer();
     buf.writeln('# Auto-generated XDC for $name');
     for (final entry in pinMap.entries) {
+      if (!_emitPin(entry.key, knownPorts)) continue;
       final attrs = _ioAttrs(entry.value);
       final ioStandard = attrs.where((a) => !a.contains('=')).firstOrNull;
       // No braces around the port name in get_ports: the open-source
@@ -1216,4 +1318,714 @@ enum HarborFpgaVendor {
 
   /// Xilinx openXC7 (open-source)
   openXc7,
+}
+
+/// Verilator simulation target.
+///
+/// Verilator cannot simulate vendor IP, so this is not an FPGA vendor and not a
+/// variant of one: under this target the SoC instantiates NO vendor primitives
+/// at all. No PLL, no SERDES, no BSCAN, no PDK memory macro. Clock domains
+/// become top-level input ports driven by the generated C++ harness at their
+/// configured frequency, so clock-crossing logic is still exercised rather than
+/// collapsed onto one clock.
+///
+/// The emitted Silicon IP Package builds a simulator with `make` the same way
+/// an FPGA package builds a bitstream, and keeps the same `.dts`/`.svd`, so the
+/// same software images boot against it.
+class HarborSimTarget extends HarborDeviceTarget {
+  @override
+  String get name => 'verilator';
+
+  /// Top-level module name for the Verilated design.
+  final String topCell;
+
+  /// Frequency in Hz of the primary input clock. Every other domain is derived
+  /// from its own [HarborClockConfig] frequency by the harness clock wheel.
+  final int frequency;
+
+  /// Emit FST waveform tracing support. Tracing costs a large constant factor
+  /// in run time, so it is opt-in and also gated behind a `--trace` flag in the
+  /// generated harness.
+  final bool trace;
+
+  /// Verilator's `--trace-depth`. Ignored when [trace] is false.
+  final int traceDepth;
+
+  /// Serve the RISC-V debug module over OpenOCD's `remote_bitbang` protocol on
+  /// this TCP port. Only takes effect when the SoC has a [HarborJtagDebug]
+  /// master; see [generateOpenocdConfig].
+  ///
+  /// Defaults to [JtagRemote.defaultPort], so the Verilator server and the
+  /// ROHD-side [JtagRemote] answer on the same port and one openocd.cfg works
+  /// against either simulator.
+  final int jtagPort;
+
+  /// Extra Verilator warnings to suppress, on top of the defaults that ROHD
+  /// output reliably trips.
+  final List<String> extraWarningsOff;
+
+  /// Optimisation level passed to Verilator (`-O3` by default) and to the
+  /// generated C++.
+  final int optLevel;
+
+  /// Number of runtime threads for the Verilated model (`--threads N`).
+  ///
+  /// This is the SIM-time thread count, not the build parallelism (which is the
+  /// `-j` flag). A value of 1 keeps the single-threaded model, which Verilator
+  /// runs with no synchronisation overhead. A value above 1 partitions the
+  /// model across that many host threads: useful for a large SoC where a boot
+  /// is billions of cycles, but a small design can go slower because the
+  /// partition sync costs more than it saves. Clamped to at least 1.
+  final int threads;
+
+  const HarborSimTarget({
+    this.topCell = 'harbor_soc',
+    this.frequency = 100000000,
+    this.trace = false,
+    this.traceDepth = 99,
+    this.jtagPort = JtagRemote.defaultPort,
+    this.extraWarningsOff = const [],
+    this.optLevel = 3,
+    this.threads = 1,
+  });
+
+  /// Warnings ROHD-emitted SystemVerilog actually trips, measured by linting a
+  /// full SoC (core + fabric + DDR + SDIO) with NO suppressions:
+  ///
+  /// - `WIDTHEXPAND` (82 hits) and `CASEINCOMPLETE` (21) come from ROHD's
+  ///   explicit sizing and its `Case` lowering, not from design bugs.
+  /// - `UNOPTFLAT` does not appear in a lint run because it is a `--cc`
+  ///   scheduling diagnostic that lint does not analyse. It is kept for the
+  ///   combinational ack paths through the bus fabric, and is the one entry
+  ///   here still worth re-testing on a full `--cc` build.
+  ///
+  /// `WIDTHTRUNC`, `UNUSEDSIGNAL`, `UNDRIVEN` and `MULTIDRIVEN` were suppressed
+  /// on my guess and never fired once measured, so they are gone: a suppression
+  /// nothing needs only hides the day one of them means something.
+  static const defaultWarningsOff = [
+    'UNOPTFLAT',
+    'WIDTHEXPAND',
+    'CASEINCOMPLETE',
+  ];
+
+  List<String> get warningsOff => [...defaultWarningsOff, ...extraWarningsOff];
+}
+
+/// Emission for [HarborSimTarget]: the Verilator build of a Silicon IP Package.
+extension HarborSimTargetEmit on HarborSimTarget {
+  /// Verilator invocation. Mirrors [HarborFpgaTarget.generateMakefile]: `make`
+  /// in the package directory produces the artifact, here a simulator binary
+  /// rather than a bitstream.
+  String generateMakefile(
+    String topName, {
+    List<HarborSimModel> models = const [],
+  }) {
+    final buf = StringBuffer();
+    buf.writeln('# Auto-generated Makefile for the Verilator simulation build');
+    buf.writeln('TOP = $topCell');
+    buf.writeln('SIM = V\$(TOP)');
+    buf.writeln('VERILATOR ?= verilator');
+    buf.writeln();
+    buf.writeln('WARNINGS = ${warningsOff.map((w) => '-Wno-$w').join(' ')}');
+    buf.writeln('VFLAGS = --cc --exe --build -j 0 -O$optLevel \\');
+    buf.writeln('         --top-module \$(TOP) -f filelist.f \$(WARNINGS) \\');
+    buf.writeln('         -CFLAGS "-O$optLevel -std=c++17"');
+    // Build flags the host-side models asked for (a graphics backend, a codec).
+    // Deduplicated so two instances of one model do not double their flags.
+    final cflags = {for (final m in models) ...m.cflags};
+    final ldflags = {for (final m in models) ...m.ldflags};
+    final packages = {for (final m in models) ...m.pkgConfig};
+    if (packages.isNotEmpty) {
+      buf.writeln();
+      buf.writeln(
+        '# Host libraries the simulation models need. Resolved here,',
+      );
+      buf.writeln('# at build time, so this package carries no host paths.');
+      for (final pkg in packages) {
+        final variable = pkg.toUpperCase().replaceAll(
+          RegExp(r'[^A-Z0-9]'),
+          '_',
+        );
+        buf.writeln(
+          '${variable}_CFLAGS := \$(shell pkg-config --cflags $pkg '
+          '2>/dev/null)',
+        );
+        buf.writeln(
+          '${variable}_LIBS := \$(shell pkg-config --libs $pkg 2>/dev/null)',
+        );
+        // An unfound package otherwise expands to empty flags, and the build
+        // fails much later with an error that names something else entirely.
+        buf.writeln('ifeq (\$(strip \$(${variable}_LIBS)),)');
+        buf.writeln(
+          '\$(error pkg-config cannot find "$pkg", which a simulation model '
+          'needs. Install it, or set PKG_CONFIG_PATH.)',
+        );
+        buf.writeln('endif');
+        buf.writeln('VFLAGS += -CFLAGS "\$(${variable}_CFLAGS)"');
+        buf.writeln('VFLAGS += -LDFLAGS "\$(${variable}_LIBS)"');
+      }
+      buf.writeln();
+    }
+    if (cflags.isNotEmpty) {
+      buf.writeln('VFLAGS += -CFLAGS "${cflags.join(' ')}"');
+    }
+    if (ldflags.isNotEmpty) {
+      buf.writeln('VFLAGS += -LDFLAGS "${ldflags.join(' ')}"');
+    }
+    final simThreads = threads < 1 ? 1 : threads;
+    if (simThreads > 1) {
+      // Runtime multi-threading of the Verilated model. This is not the build
+      // `-j`; it partitions the simulation across host threads at run time.
+      buf.writeln('VFLAGS += --threads $simThreads');
+      if (trace) {
+        // A threaded model needs a threaded trace writer, or the FST dump
+        // serialises the whole model back onto one thread.
+        buf.writeln('VFLAGS += --trace-threads $simThreads');
+      }
+    }
+    if (trace) {
+      buf.writeln('VFLAGS += --trace-fst --trace-depth $traceDepth');
+    }
+    buf.writeln();
+    buf.writeln('.PHONY: all run clean');
+    buf.writeln();
+    buf.writeln('all: obj_dir/\$(SIM)');
+    buf.writeln();
+    buf.writeln(
+      'obj_dir/\$(SIM): filelist.f sim/main.cpp \$(wildcard rtl/*.sv)',
+    );
+    buf.writeln('\t\$(VERILATOR) \$(VFLAGS) sim/main.cpp');
+    buf.writeln();
+    buf.writeln('run: obj_dir/\$(SIM)');
+    buf.writeln('\t./obj_dir/\$(SIM) \$(SIM_ARGS)');
+    buf.writeln();
+    buf.writeln('clean:');
+    buf.writeln('\trm -rf obj_dir');
+    return buf.toString();
+  }
+
+  /// OpenOCD configuration for the simulated debug module.
+  ///
+  /// Unlike the FPGA targets there is no config-JTAG TAP and no BSCAN tunnel:
+  /// the debug module sits directly on top-level TCK/TMS/TDI/TDO, which the
+  /// harness serves over OpenOCD's `remote_bitbang` protocol. So no
+  /// `innerIrWidth` and no tunnel stanza.
+  String generateOpenocdConfig({int? dmIdcode, String targetName = 'cpu'}) {
+    final buf = StringBuffer();
+    buf.writeln('# Auto-generated by Harbor. OpenOCD against the Verilator');
+    buf.writeln('# simulation over remote_bitbang. Start the simulator first,');
+    buf.writeln('# then: openocd -f openocd.cfg');
+    buf.writeln();
+    buf.writeln('adapter driver remote_bitbang');
+    buf.writeln('remote_bitbang host localhost');
+    buf.writeln('remote_bitbang port $jtagPort');
+    buf.writeln();
+    // No real adapter, so the speed setting is advisory only.
+    buf.writeln('transport select jtag');
+    buf.writeln();
+    if (dmIdcode != null) {
+      final id = '0x${dmIdcode.toRadixString(16).padLeft(8, '0')}';
+      buf.writeln('jtag newtap $targetName tap -irlen 5 -expected-id $id');
+    } else {
+      buf.writeln('jtag newtap $targetName tap -irlen 5');
+    }
+    buf.writeln(
+      'target create $targetName.0 riscv -chain-position $targetName.tap',
+    );
+    buf.writeln('init');
+    buf.writeln('halt');
+    return buf.toString();
+  }
+}
+
+/// C++ harness emission for [HarborSimTarget].
+extension HarborSimTargetHarness on HarborSimTarget {
+  /// The Verilated testbench.
+  ///
+  /// [clockPorts] maps each derived clock's top-level port name to its
+  /// frequency in Hz; the primary input clock is added at [frequency]. Each
+  /// clock keeps its own next-edge time, so domains genuinely run at different
+  /// rates and the crossings are exercised.
+  String generateMain({
+    required String topCell,
+    required Map<String, int> clockPorts,
+    List<HarborSimModel> models = const [],
+    bool hasJtag = false,
+    String resetPort = 'reset',
+    String primaryClockPort = 'clk',
+    String jtagTckPort = 'jtag_tck',
+    String jtagTmsPort = 'jtag_tms',
+    String jtagTdiPort = 'jtag_tdi',
+    String jtagTdoPort = 'jtag_tdo',
+    String jtagTrstPort = 'jtag_trst',
+  }) {
+    final all = <String, int>{primaryClockPort: frequency, ...clockPorts};
+    final b = StringBuffer();
+
+    b.writeln('// Auto-generated Verilator harness for $topCell.');
+    b.writeln('// Build with `make`, run with `make run SIM_ARGS="..."`.');
+    b.writeln('#include <cstdio>');
+    b.writeln('#include <cstdlib>');
+    b.writeln('#include <cstring>');
+    b.writeln('#include <cstdint>');
+    b.writeln('#include "V$topCell.h"');
+    b.writeln('#include "verilated.h"');
+    if (trace) b.writeln('#include "verilated_fst_c.h"');
+    for (final h in {for (final m in models) m.headerPath}) {
+      // headerPath is relative to the package root; main.cpp lives in sim/.
+      b.writeln('#include "${h.substring('sim/'.length)}"');
+    }
+    if (hasJtag) {
+      b.writeln('#include <arpa/inet.h>');
+      b.writeln('#include <fcntl.h>');
+      b.writeln('#include <netinet/in.h>');
+      b.writeln('#include <netinet/tcp.h>');
+      b.writeln('#include <unistd.h>');
+    }
+    b.writeln();
+    b.writeln('static V$topCell* top;');
+    for (final m in models) {
+      b.writeln(m.declaration);
+    }
+    b.writeln('static uint64_t time_ps = 0;');
+    b.writeln('double sc_time_stamp() { return (double)time_ps; }');
+    b.writeln();
+
+    // --- clock wheel -------------------------------------------------------
+    b.writeln(
+      '// One entry per clock domain. Each advances on its own period,',
+    );
+    b.writeln('// so the design sees genuinely asynchronous domains.');
+    b.writeln('struct ClockPort {');
+    b.writeln('  const char* name;');
+    b.writeln('  uint64_t half_ps;   // half period');
+    b.writeln('  uint64_t next_ps;   // time of the next edge');
+    b.writeln('  CData* sig;');
+    b.writeln('};');
+    b.writeln();
+    b.writeln('static ClockPort clocks[] = {');
+    for (final e in all.entries) {
+      // Half period in ps. 1e12 / (2*f), rounded to at least one ps.
+      final halfPs = (1000000000000 / (2 * e.value)).round();
+      b.writeln(
+        '  {"${e.key}", ${halfPs < 1 ? 1 : halfPs}, 0, nullptr}, '
+        '// ${e.value} Hz',
+      );
+    }
+    b.writeln('};');
+    b.writeln(
+      'static const int kNumClocks = '
+      '${all.length};',
+    );
+    b.writeln();
+    b.writeln('static void bindClocks() {');
+    var i = 0;
+    for (final e in all.entries) {
+      b.writeln('  clocks[$i].sig = &top->${e.key};');
+      b.writeln('  clocks[$i].next_ps = clocks[$i].half_ps;');
+      i++;
+    }
+    b.writeln('}');
+    b.writeln();
+
+    if (hasJtag)
+      _emitJtagServer(
+        b,
+        jtagTckPort,
+        jtagTmsPort,
+        jtagTdiPort,
+        jtagTdoPort,
+        jtagTrstPort,
+      );
+
+    // --- main --------------------------------------------------------------
+    b.writeln('int main(int argc, char** argv) {');
+    b.writeln('  Verilated::commandArgs(argc, argv);');
+    b.writeln('  uint64_t max_ps = 0;      // 0 = run forever');
+    if (trace) b.writeln('  const char* trace_path = nullptr;');
+    if (hasJtag) b.writeln('  int jtag_port = $jtagPort;');
+    b.writeln('  for (int a = 1; a < argc; a++) {');
+    b.writeln('    if (!strncmp(argv[a], "--max-ns=", 9))');
+    b.writeln('      max_ps = strtoull(argv[a] + 9, nullptr, 0) * 1000ULL;');
+    if (trace) {
+      b.writeln('    else if (!strncmp(argv[a], "--trace=", 8))');
+      b.writeln('      trace_path = argv[a] + 8;');
+    }
+    if (hasJtag) {
+      b.writeln('    else if (!strncmp(argv[a], "--jtag-port=", 12))');
+      b.writeln('      jtag_port = atoi(argv[a] + 12);');
+    }
+    for (final m in models) {
+      final cli = m.cliOption;
+      if (cli != null) b.writeln('    $cli');
+    }
+    b.writeln('  }');
+    b.writeln();
+    b.writeln('  top = new V$topCell;');
+    b.writeln('  bindClocks();');
+    if (trace) {
+      b.writeln('  VerilatedFstC* tfp = nullptr;');
+      b.writeln('  if (trace_path) {');
+      b.writeln('    Verilated::traceEverOn(true);');
+      b.writeln('    tfp = new VerilatedFstC;');
+      b.writeln('    top->trace(tfp, $traceDepth);');
+      b.writeln('    tfp->open(trace_path);');
+      b.writeln('  }');
+    }
+    if (hasJtag) {
+      b.writeln('  jtagListen(jtag_port);');
+      b.writeln('  top->$jtagTrstPort = 0;');
+    }
+    b.writeln();
+    b.writeln(
+      '  // Hold reset over several edges of the SLOWEST clock, so every',
+    );
+    b.writeln(
+      '  // domain sees it asserted for at least a few of its own edges.',
+    );
+    b.writeln('  uint64_t slowest_half = 0;');
+    b.writeln('  for (int c = 0; c < kNumClocks; c++)');
+    b.writeln(
+      '    if (clocks[c].half_ps > slowest_half) '
+      'slowest_half = clocks[c].half_ps;',
+    );
+    b.writeln('  const uint64_t reset_until = slowest_half * 20;');
+    b.writeln('  top->$resetPort = 1;');
+    b.writeln();
+    b.writeln('  while (!Verilated::gotFinish()) {');
+    b.writeln('    if (max_ps && time_ps >= max_ps) break;');
+    b.writeln(
+      '    // Advance to the next edge of whichever clock is due first.',
+    );
+    b.writeln('    uint64_t next = UINT64_MAX;');
+    b.writeln('    for (int c = 0; c < kNumClocks; c++)');
+    b.writeln('      if (clocks[c].next_ps < next) next = clocks[c].next_ps;');
+    b.writeln('    time_ps = next;');
+    b.writeln('    bool toggled[kNumClocks] = {false};');
+    b.writeln('    for (int c = 0; c < kNumClocks; c++) {');
+    b.writeln('      if (clocks[c].next_ps != time_ps) continue;');
+    b.writeln('      *clocks[c].sig = !*clocks[c].sig;');
+    b.writeln('      clocks[c].next_ps += clocks[c].half_ps;');
+    b.writeln('      toggled[c] = true;');
+    b.writeln('    }');
+    b.writeln(
+      '    if (top->$resetPort && time_ps >= reset_until) '
+      'top->$resetPort = 0;',
+    );
+    b.writeln('    top->eval();');
+    if (models.isNotEmpty) {
+      b.writeln(
+        '    // Host-side models, on the edges of the clock domain each',
+      );
+      b.writeln('    // one declared. Gated on the clock having actually');
+      b.writeln(
+        '    // toggled this iteration: another domain\'s edge must not',
+      );
+      b.writeln(
+        '    // tick a model whose own clock merely happens to be high.',
+      );
+      final ports = all.keys.toList();
+      final byClock = <String, List<HarborSimModel>>{};
+      for (final m in models) {
+        (byClock[m.clockPort] ??= []).add(m);
+      }
+      for (final entry in byClock.entries) {
+        final index = ports.indexOf(entry.key);
+        if (index < 0) {
+          throw StateError(
+            'sim model on clock port "${entry.key}", which is not a clock '
+            'domain of this SoC (have: ${ports.join(', ')})',
+          );
+        }
+        final rising = entry.value
+            .where((m) => m.edge == HarborSimClockEdge.rising)
+            .toList();
+        final falling = entry.value
+            .where((m) => m.edge == HarborSimClockEdge.falling)
+            .toList();
+        final both = entry.value
+            .where((m) => m.edge == HarborSimClockEdge.both)
+            .toList();
+        b.writeln('    if (toggled[$index]) {');
+        for (final m in both) {
+          b.writeln('      ${m.tick}');
+        }
+        if (rising.isNotEmpty) {
+          b.writeln('      if (top->${entry.key}) {');
+          for (final m in rising) {
+            b.writeln('        ${m.tick}');
+          }
+          b.writeln('      }');
+        }
+        if (falling.isNotEmpty) {
+          b.writeln('      if (!top->${entry.key}) {');
+          for (final m in falling) {
+            b.writeln('        ${m.tick}');
+          }
+          b.writeln('      }');
+        }
+        b.writeln('    }');
+      }
+    }
+    if (hasJtag) {
+      b.writeln('    // Serve JTAG only on the primary clock rising edge: the');
+      b.writeln('    // bitbang protocol drives TCK itself, so it must not be');
+      b.writeln('    // stepped faster than the design can sample it.');
+      b.writeln('    if (*clocks[0].sig) { jtagPoll(); top->eval(); }');
+    }
+    if (trace) b.writeln('    if (tfp) tfp->dump(time_ps);');
+    b.writeln('  }');
+    b.writeln();
+    if (trace) b.writeln('  if (tfp) { tfp->close(); delete tfp; }');
+    b.writeln('  top->final();');
+    b.writeln('  delete top;');
+    b.writeln('  return 0;');
+    b.writeln('}');
+    return b.toString();
+  }
+
+  /// OpenOCD `remote_bitbang`: a one-character-per-operation ASCII protocol
+  /// over TCP. This is what spike and rocket-chip speak, so stock OpenOCD and
+  /// GDB attach with no custom adapter.
+  void _emitJtagServer(
+    StringBuffer b,
+    String tck,
+    String tms,
+    String tdi,
+    String tdo,
+    String trst,
+  ) {
+    b.writeln(
+      '// --- OpenOCD remote_bitbang server ---------------------------',
+    );
+    b.writeln('// Protocol: 0-7 write {tck,tms,tdi} (bit2=TCK, bit1=TMS,');
+    b.writeln(
+      '// bit0=TDI); R read TDO; r/s/t/u reset (bit1=TRST, bit0=SRST);',
+    );
+    b.writeln('// B/b blink; Q quit.');
+    b.writeln('static int jtag_listen_fd = -1;');
+    b.writeln('static int jtag_fd = -1;');
+    b.writeln();
+    b.writeln('static void jtagListen(int port) {');
+    b.writeln('  jtag_listen_fd = socket(AF_INET, SOCK_STREAM, 0);');
+    b.writeln('  if (jtag_listen_fd < 0) { perror("socket"); exit(1); }');
+    b.writeln('  int one = 1;');
+    b.writeln(
+      '  setsockopt(jtag_listen_fd, SOL_SOCKET, SO_REUSEADDR, '
+      '&one, sizeof(one));',
+    );
+    b.writeln('  sockaddr_in addr {};');
+    b.writeln('  addr.sin_family = AF_INET;');
+    b.writeln('  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);');
+    b.writeln('  addr.sin_port = htons(port);');
+    b.writeln(
+      '  if (bind(jtag_listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) '
+      '{ perror("bind"); exit(1); }',
+    );
+    b.writeln(
+      '  if (listen(jtag_listen_fd, 1) < 0) '
+      '{ perror("listen"); exit(1); }',
+    );
+    b.writeln('  fcntl(jtag_listen_fd, F_SETFL, O_NONBLOCK);');
+    b.writeln(
+      '  printf("[harbor] remote_bitbang listening on port %d\\n", '
+      'port);',
+    );
+    b.writeln('  fflush(stdout);');
+    b.writeln('}');
+    b.writeln();
+    b.writeln('static void jtagPoll() {');
+    b.writeln('  if (jtag_fd < 0) {');
+    b.writeln('    jtag_fd = accept(jtag_listen_fd, nullptr, nullptr);');
+    b.writeln('    if (jtag_fd < 0) return;');
+    b.writeln('    fcntl(jtag_fd, F_SETFL, O_NONBLOCK);');
+    b.writeln('    int one = 1;');
+    b.writeln(
+      '    setsockopt(jtag_fd, IPPROTO_TCP, TCP_NODELAY, '
+      '&one, sizeof(one));',
+    );
+    b.writeln('    printf("[harbor] openocd attached\\n"); fflush(stdout);');
+    b.writeln('  }');
+    b.writeln('  char c;');
+    b.writeln('  // One command per call keeps TCK stepping in lockstep with');
+    b.writeln('  // the design clock rather than racing ahead of it.');
+    b.writeln('  ssize_t n = read(jtag_fd, &c, 1);');
+    b.writeln('  if (n != 1) return;');
+    b.writeln('  switch (c) {');
+    b.writeln('    case \'B\': case \'b\': break;                 // blink');
+    b.writeln('    case \'R\': {');
+    b.writeln('      char r = top->$tdo ? \'1\' : \'0\';');
+    b.writeln('      if (write(jtag_fd, &r, 1) != 1) { /* peer gone */ }');
+    b.writeln('      break;');
+    b.writeln('    }');
+    b.writeln('    case \'Q\':');
+    b.writeln('      close(jtag_fd); jtag_fd = -1;');
+    b.writeln('      break;');
+    b.writeln('    case \'0\': case \'1\': case \'2\': case \'3\':');
+    b.writeln('    case \'4\': case \'5\': case \'6\': case \'7\': {');
+    b.writeln('      int v = c - \'0\';');
+    b.writeln('      top->$tck = (v >> 2) & 1;');
+    b.writeln('      top->$tms = (v >> 1) & 1;');
+    b.writeln('      top->$tdi = (v >> 0) & 1;');
+    b.writeln('      break;');
+    b.writeln('    }');
+    b.writeln('    case \'r\': case \'s\': case \'t\': case \'u\': {');
+    b.writeln('      int v = c - \'r\';');
+    b.writeln('      top->$trst = (v >> 1) & 1;   // bit0 (SRST) unused: the');
+    b.writeln(
+      '                                   // harness owns system reset',
+    );
+    b.writeln('      break;');
+    b.writeln('    }');
+    b.writeln('    default: break;');
+    b.writeln('  }');
+    b.writeln('}');
+    b.writeln();
+  }
+}
+
+/// Mixed into a `isSystemVerilogLeaf` [BridgeModule] that supplies its own
+/// behavioral body under [HarborSimTarget], because the real implementation is
+/// vendor IP Verilator cannot compile.
+///
+/// The body lives on the leaf itself, next to the port list it has to match,
+/// so the two cannot drift. `generateAll` writes it to
+/// `sim/<definitionName>.sv` and appends that to `filelist.f`; the file name is
+/// derived from the module name for the same reason `rtl/` file names are
+/// derived from `SynthFileContents.name`.
+///
+/// A leaf that does NOT mix this in is a build error under a sim target rather
+/// than a silent stub: an unimplemented leaf reads as X in simulation and
+/// sends you hunting for a design bug that is not there.
+mixin HarborSimLeaf {
+  /// SystemVerilog defining a module named exactly `definitionName`.
+  String get simRtl;
+}
+
+/// Which edge of a [HarborSimModel]'s clock port ticks it.
+enum HarborSimClockEdge {
+  /// Tick when the clock goes high. The default: what a single-data-rate pin
+  /// is sampled on.
+  rising,
+
+  /// Tick when the clock goes low.
+  falling,
+
+  /// Tick on both edges, for a DDR pin that carries a bit per edge.
+  both,
+}
+
+/// A C++ model of whatever is attached to a peripheral's pins in the real
+/// world: a terminal on a UART, a card on an SD bus, a file behind a flash.
+///
+/// The design's own logic belongs in ROHD, which emits SystemVerilog that
+/// Verilator compiles with everything else. These models are only for what
+/// ROHD cannot express: host I/O. Keep them small; a large one is a sign the
+/// logic belonged in ROHD.
+class HarborSimModel {
+  /// C++ struct name. The header is written to `sim/models/<className>.h`,
+  /// derived so the file and the type cannot disagree, and deduplicated so two
+  /// instances of the same peripheral share one header.
+  final String className;
+
+  /// Header source defining [className]. Must be self-contained and
+  /// include-guarded.
+  final String header;
+
+  /// C++ declaring the instance at file scope, e.g.
+  /// `static UartSink uart0_sink(434, "uart0");`
+  final String declaration;
+
+  /// Called after `eval()` on [clockPort]'s rising edge, e.g.
+  /// `uart0_sink.tick(top->uart0_tx);`
+  final String tick;
+
+  /// Top-level clock port whose edges tick this model. A model ticked on the
+  /// wrong domain looks like a protocol bug, so it is explicit.
+  final String clockPort;
+
+  /// Which edge of [clockPort] ticks this model. A single-data-rate pin is
+  /// sampled on one edge; a DDR pin (a TMDS lane, a DDR3 command) carries a
+  /// different bit on each edge, so a model that reads one only sees half the
+  /// stream.
+  final HarborSimClockEdge edge;
+
+  /// Optional `else if` branches spliced into the argument loop, e.g.
+  /// `else if (!strncmp(argv[a], "--uart-baud=", 12)) ...`
+  final String? cliOption;
+
+  /// Literal compiler flags this model's header needs, e.g. a `-D`.
+  final List<String> cflags;
+
+  /// Literal linker flags this model needs.
+  final List<String> ldflags;
+
+  /// Host libraries this model needs, by pkg-config package name (`cairo`,
+  /// `gtk+-3.0`).
+  ///
+  /// Resolved when the simulator is BUILT, not when it is generated, so the
+  /// output carries no host paths. A package pkg-config cannot find stops the
+  /// build with a message naming it, because the alternative is a compiler
+  /// command line with empty flags in it, which fails somewhere unrelated.
+  final List<String> pkgConfig;
+
+  const HarborSimModel({
+    required this.className,
+    required this.header,
+    required this.declaration,
+    required this.tick,
+    required this.clockPort,
+    this.edge = HarborSimClockEdge.rising,
+    this.cliOption,
+    this.cflags = const [],
+    this.ldflags = const [],
+    this.pkgConfig = const [],
+  });
+
+  String get headerPath => 'sim/models/$className.h';
+}
+
+/// What a peripheral needs to know to emit a [HarborSimModel]: chiefly the
+/// TOP-LEVEL names its pins were exposed under, which it cannot know itself.
+class HarborSimModelContext {
+  /// Peripheral port name -> top-level port name, for pins pulled up with
+  /// `HarborSoC.exposePin`.
+  final Map<String, String> exposedPins;
+
+  /// Primary input clock frequency in Hz.
+  final int clockHz;
+
+  /// Top-level port name of the primary clock.
+  final String primaryClockPort;
+
+  /// Top-level clock port THIS peripheral runs on. Not always the primary: a
+  /// peripheral on a derived domain gets its own top-level input.
+  final String peripheralClockPort;
+
+  /// Frequency of [peripheralClockPort] in Hz.
+  ///
+  /// A model must take its tick domain AND any rate it derives from the SAME
+  /// clock. Mixing them is how a UART sink ends up ticking at 100 MHz while
+  /// sizing its bit period for 50 MHz, which decodes as garbage rather than as
+  /// an error.
+  final int peripheralClockHz;
+
+  const HarborSimModelContext({
+    required this.exposedPins,
+    required this.clockHz,
+    required this.primaryClockPort,
+    required this.peripheralClockPort,
+    required this.peripheralClockHz,
+  });
+
+  /// The top-level name of [portName], or null if it was never exposed. A null
+  /// means the pin is internal, so no host-side model can reach it.
+  String? topPort(String portName) => exposedPins[portName];
+}
+
+/// Implemented by a peripheral that has something to model on the host side
+/// under [HarborSimTarget].
+mixin HarborSimModelProvider {
+  /// Models for this peripheral, or empty when its pins are not exposed.
+  List<HarborSimModel> simModels(HarborSimModelContext ctx);
 }

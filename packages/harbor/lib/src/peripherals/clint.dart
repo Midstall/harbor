@@ -85,13 +85,26 @@ class HarborClint extends BridgeModule
       softwareInterrupt[i] <= msip[i];
     }
 
+    // Expose the raw machine timer so a core can serve the `time` CSR (rdtime)
+    // natively from the SAME counter its timer interrupts compare against, so
+    // the OS clocksource and its timer events never diverge. Single clock domain
+    // (mtime ticks on the bus clock), so it reads combinationally.
+    final mtimeOut = addOutput('mtime_val', width: 64);
+    mtimeOut <= mtime;
+
     Sequential(clk, [
       If(
         reset,
         then: [
           mtime < Const(0, width: 64),
           for (var i = 0; i < hartCount; i++) ...[
-            mtimecmp[i] < Const(0, width: 64),
+            // Reset mtimecmp to all ones, not zero. The timer interrupt is
+            // mtime >= mtimecmp, so a zero reset asserts MTIP forever until
+            // software programs mtimecmp. A hart that enables the machine timer
+            // before its first set_timer then takes a continuous timer trap.
+            // All ones keeps MTIP low out of reset. Software arms the timer with
+            // a real compare value.
+            mtimecmp[i] < Const((BigInt.one << 64) - BigInt.one, width: 64),
             msip[i] < Const(0),
           ],
           ack < Const(0),

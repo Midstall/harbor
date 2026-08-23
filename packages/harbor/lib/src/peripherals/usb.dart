@@ -128,27 +128,31 @@ class HarborUsbConfig with HarborPrettyString {
 
 /// USB controller peripheral.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x000: CTRL       (enable, speed, role, reset)
-/// - 0x004: STATUS     (connected, suspended, speed_actual, ep0_setup)
-/// - 0x008: ADDR       (device address, set after SET_ADDRESS)
-/// - 0x00C: INT_STATUS (interrupt status, write-1-to-clear)
-/// - 0x010: INT_ENABLE (interrupt enable mask)
-/// - 0x014: FRAME      (current frame number, read-only)
+/// - 0x008: STATUS     (connected, suspended, speed_actual, ep0_setup)
+/// - 0x010: ADDR       (device address, set after SET_ADDRESS)
+/// - 0x018: INT_STATUS (interrupt status, write-1-to-clear)
+/// - 0x020: INT_ENABLE (interrupt enable mask)
+/// - 0x028: FRAME      (current frame number, read-only)
 ///
-/// EP0 registers (address bit 8 set, i.e. word index >= 0x100):
-/// - word 0x00: EP0_CTRL   (write: [7:4] PID nibble, [2] arm-for-IN,
-///                          [1] has-data, [0] start now, read returns busy)
-/// - word 0x03: EP0_TXDATA (write pushes one payload byte into the TX FIFO)
-/// - word 0x05: EP0_TXLEN  (write sets payload length and resets the TX FIFO)
-/// - word 0x10: EP0_RXLEN  (read: number of received body bytes)
-/// - word 0x11: EP0_RXDATA (read pops one received byte)
-/// - word 0x12: EP0_STATUS (read: [3:0] last PID, [4] tx busy, [5] awaiting
-///                          data, [6] IN armed)
-/// - word 0x20: HOST_TOKEN (host/OTG: write starts a transaction, [3:0] token
-///                          PID, [10:4] address, [14:11] endpoint, [15] toggle)
-/// - word 0x21: HOST_STATUS (host/OTG: [0] busy, [1] done, [3:2] result
-///                          (0 ACK, 1 NAK, 2 timeout, 3 stall), [7:4] resp PID)
+/// EP0 registers (the second 512-byte page, i.e. address bit 9 set). The page
+/// is 0x200, not 0x100: at 8-byte slots the EP0 block spans 0x108 bytes and no
+/// longer fits below the old 0x100 boundary.
+/// - 0x200: EP0_CTRL   (write: [7:4] PID nibble, [2] arm-for-IN,
+///                      [1] has-data, [0] start now, read returns busy)
+/// - 0x218: EP0_TXDATA (write pushes one payload byte into the TX FIFO)
+/// - 0x228: EP0_TXLEN  (write sets payload length and resets the TX FIFO)
+/// - 0x280: EP0_RXLEN  (read: number of received body bytes)
+/// - 0x288: EP0_RXDATA (read pops one received byte)
+/// - 0x290: EP0_STATUS (read: [3:0] last PID, [4] tx busy, [5] awaiting
+///                      data, [6] IN armed)
+/// - 0x300: HOST_TOKEN (host/OTG: write starts a transaction, [3:0] token
+///                      PID, [10:4] address, [14:11] endpoint, [15] toggle)
+/// - 0x308: HOST_STATUS (host/OTG: [0] busy, [1] done, [3:2] result
+///                      (0 ACK, 1 NAK, 2 timeout, 3 stall), [7:4] resp PID)
 ///
 /// The transmit side serializes SYNC, the PID, the payload/token bytes, the
 /// CRC16 and an EOP onto usb_dp/usb_dm with NRZI encoding and bit stuffing. The
@@ -669,13 +673,13 @@ class HarborUsbController extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              // Global registers (0x000-0x0FF)
+              // Global registers (0x000-0x1FF)
               If(
-                ~bus.addr[8],
+                ~bus.addr[9],
                 then: [
-                  Case(bus.addr.getRange(0, 6), [
+                  Case(bus.addr.getRange(0, 9), [
                     // 0x000: CTRL ([0] enable, [1] host mode for OTG builds)
-                    CaseItem(Const(0x00, width: 6), [
+                    CaseItem(Const(0x00, width: 9), [
                       If(
                         bus.we,
                         then: [
@@ -691,9 +695,9 @@ class HarborUsbController extends BridgeModule
                         ],
                       ),
                     ]),
-                    // 0x004: STATUS ([0] connected, [7:4] negotiated speed,
+                    // 0x008: STATUS ([0] connected, [7:4] negotiated speed,
                     // [8] high-speed, [9] SuperSpeed link up)
-                    CaseItem(Const(0x01, width: 6), [
+                    CaseItem(Const(0x08, width: 9), [
                       bus.dataOut <
                           connected.zeroExtend(32) |
                               (mux(
@@ -718,16 +722,16 @@ class HarborUsbController extends BridgeModule
                               (hsMode.zeroExtend(32) << Const(8, width: 32)) |
                               (ssLinkUp.zeroExtend(32) << Const(9, width: 32)),
                     ]),
-                    // 0x008: ADDR
-                    CaseItem(Const(0x02, width: 6), [
+                    // 0x010: ADDR
+                    CaseItem(Const(0x10, width: 9), [
                       If(
                         bus.we,
                         then: [deviceAddr < bus.dataIn.getRange(0, 7)],
                         orElse: [bus.dataOut < deviceAddr.zeroExtend(32)],
                       ),
                     ]),
-                    // 0x00C: INT_STATUS (write-1-to-clear)
-                    CaseItem(Const(0x03, width: 6), [
+                    // 0x018: INT_STATUS (write-1-to-clear)
+                    CaseItem(Const(0x18, width: 9), [
                       If(
                         bus.we,
                         then: [
@@ -736,16 +740,16 @@ class HarborUsbController extends BridgeModule
                         orElse: [bus.dataOut < intStatus.zeroExtend(32)],
                       ),
                     ]),
-                    // 0x010: INT_ENABLE
-                    CaseItem(Const(0x04, width: 6), [
+                    // 0x020: INT_ENABLE
+                    CaseItem(Const(0x20, width: 9), [
                       If(
                         bus.we,
                         then: [intEnable < bus.dataIn.getRange(0, 8)],
                         orElse: [bus.dataOut < intEnable.zeroExtend(32)],
                       ),
                     ]),
-                    // 0x014: FRAME
-                    CaseItem(Const(0x05, width: 6), [
+                    // 0x028: FRAME
+                    CaseItem(Const(0x28, width: 9), [
                       bus.dataOut < frameNum.zeroExtend(32),
                     ]),
                   ]),
@@ -753,19 +757,19 @@ class HarborUsbController extends BridgeModule
               ),
 
               // EP0 transmit registers (addr bit 8 set).
-              // - word 0x00: EP0_CTRL  write kicks a packet
+              // - 0x200: EP0_CTRL  write kicks a packet
               //              [7:4] PID nibble, [1] has-data, [0] start
               //              read returns busy in bit 0
-              // - word 0x03: EP0_TXDATA  write pushes a payload byte
-              // - word 0x05: EP0_TXLEN   write sets payload length, resets FIFO
+              // - 0x218: EP0_TXDATA  write pushes a payload byte
+              // - 0x228: EP0_TXLEN   write sets payload length, resets FIFO
               If(
-                bus.addr[8],
+                bus.addr[9],
                 then: [
-                  Case(bus.addr.getRange(0, 6), [
+                  Case(bus.addr.getRange(0, 9), [
                     // EP0_CTRL: [7:4] PID, [2] arm-for-IN, [1] has-data,
                     // [0] start now. Arming queues the packet so the next IN
                     // token from the host transmits it.
-                    CaseItem(Const(0x00, width: 6), [
+                    CaseItem(Const(0x00, width: 9), [
                       If(
                         bus.we,
                         then: [
@@ -786,7 +790,7 @@ class HarborUsbController extends BridgeModule
                       ),
                     ]),
                     // EP0_TXDATA
-                    CaseItem(Const(0x03, width: 6), [
+                    CaseItem(Const(0x18, width: 9), [
                       If(
                         bus.we,
                         then: [
@@ -800,7 +804,7 @@ class HarborUsbController extends BridgeModule
                       ),
                     ]),
                     // EP0_TXLEN
-                    CaseItem(Const(0x05, width: 6), [
+                    CaseItem(Const(0x28, width: 9), [
                       If(
                         bus.we,
                         then: [
@@ -811,11 +815,11 @@ class HarborUsbController extends BridgeModule
                       ),
                     ]),
                     // EP0_RXLEN: number of received body bytes (read-only)
-                    CaseItem(Const(0x10, width: 6), [
+                    CaseItem(Const(0x80, width: 9), [
                       bus.dataOut < rxLen.zeroExtend(32),
                     ]),
                     // EP0_RXDATA: pop one received byte
-                    CaseItem(Const(0x11, width: 6), [
+                    CaseItem(Const(0x88, width: 9), [
                       bus.dataOut < rxReadByte.zeroExtend(32),
                       If(
                         ~bus.we,
@@ -824,7 +828,7 @@ class HarborUsbController extends BridgeModule
                     ]),
                     // EP0_STATUS: [3:0] last PID, [4] tx busy, [5] awaiting
                     // data, [6] IN armed
-                    CaseItem(Const(0x12, width: 6), [
+                    CaseItem(Const(0x90, width: 9), [
                       bus.dataOut <
                           rxPid.zeroExtend(32) |
                               (txBusy.zeroExtend(32) << Const(4, width: 32)) |
@@ -836,7 +840,7 @@ class HarborUsbController extends BridgeModule
                     //   [3:0] token PID, [10:4] address, [14:11] endpoint,
                     //   [15] data toggle (DATA1 when set)
                     if (roleHasHost)
-                      CaseItem(Const(0x20, width: 6), [
+                      CaseItem(Const(0x100, width: 9), [
                         If(
                           bus.we & hostMode,
                           then: [
@@ -861,7 +865,7 @@ class HarborUsbController extends BridgeModule
                     // HOST_STATUS (0x21): [0] busy, [1] done, [3:2] result
                     //   (0 ACK, 1 NAK, 2 timeout, 3 stall), [7:4] response PID
                     if (roleHasHost)
-                      CaseItem(Const(0x21, width: 6), [
+                      CaseItem(Const(0x108, width: 9), [
                         bus.dataOut <
                             hostBusy.zeroExtend(32) |
                                 (hostDone.zeroExtend(32) <<

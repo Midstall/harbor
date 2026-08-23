@@ -25,6 +25,11 @@ const rvC = RiscVExtension(
       funct3: C0Funct3.cAddi4spn,
       format: ciwType,
       immKind: RvcImm.ciwAddi4spn,
+      // The nzuimm field (bits 12:5) must be non-zero. The ISA reserves the
+      // all-zero nzuimm encoding as illegal, so that the whole-zero halfword
+      // 0x0000 traps instead of running as a nop. Without this the core sleds
+      // through zeroed memory on a bad jump instead of faulting.
+      nonZeroMask: 0x1FE0, // nzuimm[12:5] != 0
       fixedRs1: 2, // base is sp (x2)
       resources: [RfResource(_int, rs1), RfResource(_int, rd)],
       microcode: [

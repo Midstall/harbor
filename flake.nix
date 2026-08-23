@@ -75,9 +75,9 @@
             packages = lib.mapAttrs (
               _name: prevLinuxPackages:
               prevLinuxPackages.extend (
-                _lpFinal: _lpPrev: {
+                lpFinal: _lpPrev: {
                   harbor-kmod = callPackage ./pkgs/harbor-kmod {
-                    inherit (prevLinuxPackages) kernel kernelModuleMakeFlags;
+                    inherit (lpFinal) kernel kernelModuleMakeFlags;
                   };
                 }
               )

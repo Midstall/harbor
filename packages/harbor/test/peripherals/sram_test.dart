@@ -26,7 +26,11 @@ void main() {
     });
 
     test('DT reg.size matches input size', () {
-      final sram = HarborSram(baseAddress: 0x80000000, size: 8192);
+      final sram = HarborSram(
+        baseAddress: 0x80000000,
+        size: 8192,
+        target: const HarborSimTarget(),
+      );
       final dt = sram.dtNode;
       expect(dt.reg.size, equals(8192));
       expect(dt.reg.start, equals(0x80000000));

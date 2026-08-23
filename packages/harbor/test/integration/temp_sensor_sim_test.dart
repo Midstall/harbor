@@ -18,9 +18,9 @@ void main() {
       final tb = PeripheralTestBench(temp);
       await tb.init();
 
-      // CTRL word addr 0: bit 0=enable, bit 1=continuous
-      await tb.write(0, 0x03);
-      final val = await tb.read(0);
+      // CTRL byte offset 0x00: bit 0=enable, bit 1=continuous
+      await tb.write(0x00, 0x03);
+      final val = await tb.read(0x00);
       expect(val & 0x03, equals(0x03));
 
       await Simulator.endSimulation();
@@ -34,9 +34,9 @@ void main() {
       final tb = PeripheralTestBench(temp);
       await tb.init();
 
-      // ALARM_HI word addr 4 (0x10 >> 2)
-      await tb.write(4, 95000);
-      final val = await tb.read(4);
+      // ALARM_HI byte offset 0x20
+      await tb.write(0x20, 95000);
+      final val = await tb.read(0x20);
       expect(val, equals(95000));
 
       await Simulator.endSimulation();
@@ -50,9 +50,9 @@ void main() {
       final tb = PeripheralTestBench(temp);
       await tb.init();
 
-      // ALARM_LO word addr 5 (0x14 >> 2)
-      await tb.write(5, 10000);
-      final val = await tb.read(5);
+      // ALARM_LO byte offset 0x28
+      await tb.write(0x28, 10000);
+      final val = await tb.read(0x28);
       expect(val, equals(10000));
 
       await Simulator.endSimulation();
@@ -66,9 +66,9 @@ void main() {
       final tb = PeripheralTestBench(temp);
       await tb.init();
 
-      // INT_ENABLE word addr 7 (0x1C >> 2)
-      await tb.write(7, 0x07);
-      final val = await tb.read(7);
+      // INT_ENABLE byte offset 0x38
+      await tb.write(0x38, 0x07);
+      final val = await tb.read(0x38);
       expect(val & 0x07, equals(0x07));
 
       await Simulator.endSimulation();
@@ -82,8 +82,8 @@ void main() {
       final tb = PeripheralTestBench(temp);
       await tb.init();
 
-      // STATUS word addr 1 (0x04 >> 2)
-      final val = await tb.read(1);
+      // STATUS byte offset 0x08
+      final val = await tb.read(0x08);
       // After reset: data_valid=0, over_temp=0
       expect(val & 0x03, equals(0));
 

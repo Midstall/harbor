@@ -2,9 +2,14 @@
 /*
  * Harbor Watchdog timer driver
  *
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour.
+ *
  * Registers:
- *   0x00: CTRL      0x04: STATUS    0x08: TIMEOUT
- *   0x0C: WINDOW    0x10: KICK      0x14: COUNT
+ *   0x00: CTRL      0x08: STATUS    0x10: TIMEOUT
+ *   0x18: WINDOW    0x20: KICK      0x28: COUNT
  */
 
 #include <linux/module.h>
@@ -15,11 +20,11 @@
 #include <linux/clk.h>
 
 #define HARBOR_WDT_CTRL	   0x00
-#define HARBOR_WDT_STATUS  0x04
-#define HARBOR_WDT_TIMEOUT 0x08
-#define HARBOR_WDT_WINDOW  0x0C
-#define HARBOR_WDT_KICK	   0x10
-#define HARBOR_WDT_COUNT   0x14
+#define HARBOR_WDT_STATUS  0x08
+#define HARBOR_WDT_TIMEOUT 0x10
+#define HARBOR_WDT_WINDOW  0x18
+#define HARBOR_WDT_KICK	   0x20
+#define HARBOR_WDT_COUNT   0x28
 
 #define HARBOR_WDT_KICK_MAGIC 0x4B494B
 

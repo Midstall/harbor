@@ -64,7 +64,13 @@ void main() {
 
   group('HarborSram', () {
     test('creates with correct config', () {
-      final sram = HarborSram(baseAddress: 0x80000000, size: 64 * 1024);
+      // Bigger than the generic register-per-word model holds, so it takes
+      // a target: this checks the metadata, not the storage.
+      final sram = HarborSram(
+        baseAddress: 0x80000000,
+        size: 64 * 1024,
+        target: const HarborSimTarget(),
+      );
       expect(sram.bus, isNotNull);
       final dt = sram.dtNode;
       expect(dt.compatible.first, equals('harbor,sram'));

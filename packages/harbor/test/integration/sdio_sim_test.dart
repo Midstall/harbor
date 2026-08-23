@@ -19,9 +19,9 @@ void main() {
       final tb = PeripheralTestBench(sdio);
       await tb.init();
 
-      // CLK_DIV word addr 2
-      await tb.write(2, 50);
-      final val = await tb.read(2);
+      // CLK_DIV byte offset 0x10
+      await tb.write(0x10, 50);
+      final val = await tb.read(0x10);
       expect(val, equals(50));
 
       await Simulator.endSimulation();
@@ -36,9 +36,9 @@ void main() {
       final tb = PeripheralTestBench(sdio);
       await tb.init();
 
-      // CTRL word addr 0, bit 0 = enable
-      await tb.write(0, 0x01);
-      final val = await tb.read(0);
+      // CTRL byte offset 0x00, bit 0 = enable
+      await tb.write(0x00, 0x01);
+      final val = await tb.read(0x00);
       expect(val & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -53,8 +53,8 @@ void main() {
       final tb = PeripheralTestBench(sdio);
       await tb.init();
 
-      // STATUS word addr 1
-      final val = await tb.read(1);
+      // STATUS byte offset 0x08
+      final val = await tb.read(0x08);
       // card_detect bit 0 should be 0 (sd_cd = 0), busy bit 8 should be 0
       expect(val & 0x01, equals(0));
       expect((val >> 8) & 0x01, equals(0));
@@ -71,9 +71,9 @@ void main() {
       final tb = PeripheralTestBench(sdio);
       await tb.init();
 
-      // BLK_SIZE word addr 0x0A (0x28 >> 2)
-      await tb.write(0x0A, 1024);
-      final val = await tb.read(0x0A);
+      // BLK_SIZE byte offset 0x50
+      await tb.write(0x50, 1024);
+      final val = await tb.read(0x50);
       expect(val, equals(1024));
 
       await Simulator.endSimulation();

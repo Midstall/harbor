@@ -2,6 +2,9 @@ import '../../encoding/riscv_formats.dart';
 import '../extension.dart';
 import '../micro_op.dart';
 import '../operation.dart';
+import '../resource.dart';
+
+const _int = RiscVIntRegFile(32);
 
 final rvPriv = RiscVExtension(
   name: 'Priv',
@@ -48,6 +51,18 @@ final rvPriv = RiscVExtension(
       // microcode interpreter (creek) forever.
       microcode: [
         RiscVWaitForInterrupt(),
+        RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
+      ],
+    ),
+    RiscVOperation(
+      mnemonic: 'sfence.vma',
+      opcode: RiscvOpcode.system,
+      funct7: 0x09,
+      format: rType,
+      privilegeLevel: 1,
+      resources: [RfResource(_int, rs1), RfResource(_int, rs2)],
+      microcode: [
+        RiscVTlbFenceOp(),
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
       ],
     ),

@@ -35,9 +35,9 @@ void main() {
       final tb = PeripheralTestBench(pcie);
       await tb.init();
 
-      // CTRL word addr 0, bit 0 = enable
-      await tb.write(0, 0x01);
-      final val = await tb.read(0);
+      // CTRL byte offset 0x00, bit 0 = enable
+      await tb.write(0x00, 0x01);
+      final val = await tb.read(0x00);
       expect(val & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -68,8 +68,8 @@ void main() {
       final tb = PeripheralTestBench(pcie);
       await tb.init();
 
-      // STATUS word addr 1
-      final val = await tb.read(1);
+      // STATUS byte offset 0x08
+      final val = await tb.read(0x08);
       // link_up bit 0 should be 0 after reset
       expect(val & 0x01, equals(0));
 
@@ -101,9 +101,9 @@ void main() {
       final tb = PeripheralTestBench(pcie);
       await tb.init();
 
-      // INT_ENABLE word addr 4 (0x010 >> 2)
-      await tb.write(4, 0xAB);
-      final val = await tb.read(4);
+      // INT_ENABLE byte offset 0x20
+      await tb.write(0x20, 0xAB);
+      final val = await tb.read(0x20);
       expect(val, equals(0xAB));
 
       await Simulator.endSimulation();
@@ -134,8 +134,8 @@ void main() {
       final tb = PeripheralTestBench(pcie);
       await tb.init();
 
-      // LINK_CTRL word addr 2 (0x008 >> 2) - currently read-only, returns 0
-      final val = await tb.read(2);
+      // LINK_CTRL byte offset 0x10 - currently read-only, returns 0
+      final val = await tb.read(0x10);
       expect(val, equals(0));
 
       await Simulator.endSimulation();
@@ -166,9 +166,9 @@ void main() {
       final tb = PeripheralTestBench(pcie);
       await tb.init();
 
-      // BAR0_BASE word addr 8 (0x020 >> 2)
-      await tb.write(8, 0xC0000000);
-      final val = await tb.read(8);
+      // BAR0_BASE byte offset 0x40
+      await tb.write(0x40, 0xC0000000);
+      final val = await tb.read(0x40);
       expect(val, equals(0xC0000000));
 
       await Simulator.endSimulation();

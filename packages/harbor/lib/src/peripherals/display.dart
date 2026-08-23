@@ -216,17 +216,19 @@ class HarborDisplayConfig with HarborPrettyString {
 /// generates video timing signals. Supports multiple output
 /// interfaces and resolution modes.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: CTRL       (enable, interface, pixel format)
-/// - 0x04: STATUS     (vblank, underrun)
-/// - 0x08: FB_BASE    (framebuffer base address)
-/// - 0x0C: FB_STRIDE  (bytes per line)
-/// - 0x10: H_ACTIVE   (horizontal active pixels)
-/// - 0x14: H_TIMING   (front porch, sync, back porch)
-/// - 0x18: V_ACTIVE   (vertical active lines)
-/// - 0x1C: V_TIMING   (front porch, sync, back porch)
-/// - 0x20: INT_STATUS (W1C: vblank, underrun)
-/// - 0x24: INT_ENABLE
+/// - 0x08: STATUS     (vblank, underrun)
+/// - 0x10: FB_BASE    (framebuffer base address)
+/// - 0x18: FB_STRIDE  (bytes per line)
+/// - 0x20: H_ACTIVE   (horizontal active pixels)
+/// - 0x28: H_TIMING   (front porch, sync, back porch)
+/// - 0x30: V_ACTIVE   (vertical active lines)
+/// - 0x38: V_TIMING   (front porch, sync, back porch)
+/// - 0x40: INT_STATUS (W1C: vblank, underrun)
+/// - 0x48: INT_ENABLE
 class HarborDisplayController extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -407,39 +409,39 @@ class HarborDisplayController extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              Case(bus.addr.getRange(0, 4), [
-                CaseItem(Const(0x0, width: 4), [
+              Case(bus.addr.getRange(0, 7), [
+                CaseItem(Const(0x00, width: 7), [
                   If(
                     bus.we,
                     then: [enable < bus.dataIn[0]],
                     orElse: [bus.dataOut < enable.zeroExtend(32)],
                   ),
                 ]),
-                CaseItem(Const(0x1, width: 4), [
+                CaseItem(Const(0x08, width: 7), [
                   bus.dataOut < Const(0, width: 32), // STATUS
                 ]),
-                CaseItem(Const(0x2, width: 4), [
+                CaseItem(Const(0x10, width: 7), [
                   If(
                     bus.we,
                     then: [fbBase < bus.dataIn],
                     orElse: [bus.dataOut < fbBase],
                   ),
                 ]),
-                CaseItem(Const(0x3, width: 4), [
+                CaseItem(Const(0x18, width: 7), [
                   If(
                     bus.we,
                     then: [fbStride < bus.dataIn.getRange(0, 16)],
                     orElse: [bus.dataOut < fbStride.zeroExtend(32)],
                   ),
                 ]),
-                CaseItem(Const(0x4, width: 4), [
+                CaseItem(Const(0x20, width: 7), [
                   If(
                     bus.we,
                     then: [hActive < bus.dataIn.getRange(0, 12)],
                     orElse: [bus.dataOut < hActive.zeroExtend(32)],
                   ),
                 ]),
-                CaseItem(Const(0x5, width: 4), [
+                CaseItem(Const(0x28, width: 7), [
                   If(
                     bus.we,
                     then: [
@@ -455,14 +457,14 @@ class HarborDisplayController extends BridgeModule
                     ],
                   ),
                 ]),
-                CaseItem(Const(0x6, width: 4), [
+                CaseItem(Const(0x30, width: 7), [
                   If(
                     bus.we,
                     then: [vActive < bus.dataIn.getRange(0, 12)],
                     orElse: [bus.dataOut < vActive.zeroExtend(32)],
                   ),
                 ]),
-                CaseItem(Const(0x7, width: 4), [
+                CaseItem(Const(0x38, width: 7), [
                   If(
                     bus.we,
                     then: [
@@ -478,7 +480,7 @@ class HarborDisplayController extends BridgeModule
                     ],
                   ),
                 ]),
-                CaseItem(Const(0x8, width: 4), [
+                CaseItem(Const(0x40, width: 7), [
                   If(
                     bus.we,
                     then: [
@@ -487,7 +489,7 @@ class HarborDisplayController extends BridgeModule
                     orElse: [bus.dataOut < intStatus.zeroExtend(32)],
                   ),
                 ]),
-                CaseItem(Const(0x9, width: 4), [
+                CaseItem(Const(0x48, width: 7), [
                   If(
                     bus.we,
                     then: [intEnable < bus.dataIn.getRange(0, 4)],

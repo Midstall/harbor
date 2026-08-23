@@ -12,13 +12,15 @@ import '../soc/svd.dart';
 /// Provides configurable input/output pins with direction control,
 /// output value, and input readback registers.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: INPUT   (read-only, current pin values)
-/// - 0x04: OUTPUT  (read/write, output values)
-/// - 0x08: DIR     (read/write, 1=output, 0=input)
-/// - 0x0C: IRQ_EN  (read/write, interrupt enable per pin)
-/// - 0x10: IRQ_STATUS (read/write-1-to-clear, interrupt status)
-/// - 0x14: IRQ_EDGE (read/write, 0=level, 1=edge triggered)
+/// - 0x08: OUTPUT  (read/write, output values)
+/// - 0x10: DIR     (read/write, 1=output, 0=input)
+/// - 0x18: IRQ_EN  (read/write, interrupt enable per pin)
+/// - 0x20: IRQ_STATUS (read/write-1-to-clear, interrupt status)
+/// - 0x28: IRQ_EDGE (read/write, 0=level, 1=edge triggered)
 class HarborGpio extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -29,6 +31,13 @@ class HarborGpio extends BridgeModule
 
   /// Base address in the SoC memory map.
   final int baseAddress;
+
+  /// Wishbone slave address width. Defaults to 8 (256-byte register window).
+  final int busAddressWidth;
+
+  /// Wishbone slave data width. Must match the SoC fabric (e.g. 64 on an RV64
+  /// SoC). The register file itself is 32-bit; wider buses zero-extend reads.
+  final int busDataWidth;
 
   /// Bus slave port.
   late final BusSlavePort bus;
@@ -44,6 +53,8 @@ class HarborGpio extends BridgeModule
   HarborGpio({
     required this.baseAddress,
     this.pinCount = 32,
+    this.busAddressWidth = 8,
+    this.busDataWidth = 32,
     BusProtocol protocol = BusProtocol.wishbone,
     String? name,
   }) : super('HarborGpio', name: name ?? 'gpio') {
@@ -55,12 +66,16 @@ class HarborGpio extends BridgeModule
     addOutput('gpio_dir', width: pinCount);
     addOutput('interrupt');
 
+    // Bus read-data width. The register file is 32-bit; a wider fabric sees the
+    // registers zero-extended into the low word.
+    final dw = busDataWidth;
+
     bus = BusSlavePort.create(
       module: this,
       name: 'bus',
       protocol: protocol,
-      addressWidth: 8,
-      dataWidth: 32,
+      addressWidth: busAddressWidth,
+      dataWidth: dw,
     );
 
     final clk = input('clk');
@@ -79,6 +94,14 @@ class HarborGpio extends BridgeModule
     // Interrupt: OR of all enabled, active interrupts
     interrupt <= (irqStatus & irqEn).or();
 
+    // Pins raising a status bit this cycle: a rising edge on an edge-triggered
+    // pin, or a high level on a level-triggered one. This is ONE vector, not a
+    // per-pin conditional: `pinCount` separate `If`s all assigning irqStatus
+    // race under last-write-wins, so only the highest-numbered firing pin was
+    // ever recorded and every lower pin's interrupt was lost.
+    final irqSet = ((irqEdge & gpioIn & ~prevInput) | (~irqEdge & gpioIn))
+        .named('irq_set');
+
     Sequential(clk, [
       If(
         reset,
@@ -90,78 +113,71 @@ class HarborGpio extends BridgeModule
           irqEdge < Const(0, width: pinCount),
           prevInput < Const(0, width: pinCount),
           bus.ack < Const(0),
-          bus.dataOut < Const(0, width: 32),
+          bus.dataOut < Const(0, width: dw),
         ],
         orElse: [
           prevInput < gpioIn,
-
-          // Edge detection: set status on rising edge
-          for (var i = 0; i < pinCount && i < 32; i++)
-            If(
-              irqEdge[i] & gpioIn[i] & ~prevInput[i],
-              then: [irqStatus < (irqStatus | Const(1 << i, width: pinCount))],
-            ),
-          // Level detection: set status when pin high
-          for (var i = 0; i < pinCount && i < 32; i++)
-            If(
-              ~irqEdge[i] & gpioIn[i],
-              then: [irqStatus < (irqStatus | Const(1 << i, width: pinCount))],
-            ),
+          irqStatus < (irqStatus | irqSet),
 
           bus.ack < Const(0),
-          bus.dataOut < Const(0, width: 32),
+          bus.dataOut < Const(0, width: dw),
 
           If(
             bus.stb & ~bus.ack,
             then: [
               bus.ack < Const(1),
 
-              Case(bus.addr.getRange(0, 5), [
+              // Byte-address decode: registers sit 8 bytes apart (see the map
+              // above), so match the low 6 bits of the byte address directly.
+              Case(bus.addr.getRange(0, 6), [
                 // 0x00: INPUT
-                CaseItem(Const(0x00, width: 5), [
-                  bus.dataOut < gpioIn.zeroExtend(32),
+                CaseItem(Const(0x00, width: 6), [
+                  bus.dataOut < gpioIn.zeroExtend(dw),
                 ]),
-                // 0x04: OUTPUT
-                CaseItem(Const(0x04 >> 2, width: 5), [
+                // 0x08: OUTPUT
+                CaseItem(Const(0x08, width: 6), [
                   If(
                     bus.we,
                     then: [outputReg < bus.dataIn.getRange(0, pinCount)],
-                    orElse: [bus.dataOut < outputReg.zeroExtend(32)],
+                    orElse: [bus.dataOut < outputReg.zeroExtend(dw)],
                   ),
                 ]),
-                // 0x08: DIR
-                CaseItem(Const(0x08 >> 2, width: 5), [
+                // 0x10: DIR
+                CaseItem(Const(0x10, width: 6), [
                   If(
                     bus.we,
                     then: [dirReg < bus.dataIn.getRange(0, pinCount)],
-                    orElse: [bus.dataOut < dirReg.zeroExtend(32)],
+                    orElse: [bus.dataOut < dirReg.zeroExtend(dw)],
                   ),
                 ]),
-                // 0x0C: IRQ_EN
-                CaseItem(Const(0x0C >> 2, width: 5), [
+                // 0x18: IRQ_EN
+                CaseItem(Const(0x18, width: 6), [
                   If(
                     bus.we,
                     then: [irqEn < bus.dataIn.getRange(0, pinCount)],
-                    orElse: [bus.dataOut < irqEn.zeroExtend(32)],
+                    orElse: [bus.dataOut < irqEn.zeroExtend(dw)],
                   ),
                 ]),
-                // 0x10: IRQ_STATUS (write-1-to-clear)
-                CaseItem(Const(0x10 >> 2, width: 5), [
+                // 0x20: IRQ_STATUS (write-1-to-clear)
+                CaseItem(Const(0x20, width: 6), [
                   If(
                     bus.we,
                     then: [
+                      // Fold this cycle's sets back in, so a pin that raises
+                      // its status in the same cycle as the clear is not lost.
                       irqStatus <
-                          (irqStatus & ~bus.dataIn.getRange(0, pinCount)),
+                          ((irqStatus | irqSet) &
+                              ~bus.dataIn.getRange(0, pinCount)),
                     ],
-                    orElse: [bus.dataOut < irqStatus.zeroExtend(32)],
+                    orElse: [bus.dataOut < irqStatus.zeroExtend(dw)],
                   ),
                 ]),
-                // 0x14: IRQ_EDGE
-                CaseItem(Const(0x14 >> 2, width: 5), [
+                // 0x28: IRQ_EDGE
+                CaseItem(Const(0x28, width: 6), [
                   If(
                     bus.we,
                     then: [irqEdge < bus.dataIn.getRange(0, pinCount)],
-                    orElse: [bus.dataOut < irqEdge.zeroExtend(32)],
+                    orElse: [bus.dataOut < irqEdge.zeroExtend(dw)],
                   ),
                 ]),
               ]),

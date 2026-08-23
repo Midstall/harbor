@@ -61,35 +61,37 @@ List<List<int>> _transpose(List<List<int>> m) => [
 ///   (Decoded Picture Buffer)
 /// - **DMA engine**: Reads input buffers and writes output buffers
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x000: ENGINE_CTRL     (enable, reset, power state)
-/// - 0x004: ENGINE_STATUS   (busy sessions, idle, error)
-/// - 0x008: ENGINE_CAPS     (supported codecs bitmask, read-only)
-/// - 0x00C: ENGINE_VERSION  (hardware version, read-only)
-/// - 0x010: INT_STATUS      (per-session done/error bits, W1C)
-/// - 0x014: INT_ENABLE      (interrupt enable mask)
+/// - 0x008: ENGINE_STATUS   (busy sessions, idle, error)
+/// - 0x010: ENGINE_CAPS     (supported codecs bitmask, read-only)
+/// - 0x018: ENGINE_VERSION  (hardware version, read-only)
+/// - 0x020: INT_STATUS      (per-session done/error bits, W1C)
+/// - 0x028: INT_ENABLE      (interrupt enable mask)
 ///
-/// Per-session registers (0x100 + session * 0x80):
+/// Per-session registers (0x100 + session * 0x100):
 /// - +0x00: SESS_CTRL       (codec select, direction, start, abort)
-/// - +0x04: SESS_STATUS     (idle/busy/done/error, progress)
-/// - +0x08: SESS_SRC_ADDR   (source buffer DMA address)
-/// - +0x0C: SESS_SRC_SIZE   (source buffer size in bytes)
-/// - +0x10: SESS_DST_ADDR   (destination buffer DMA address)
-/// - +0x14: SESS_DST_SIZE   (destination buffer size / bytes written)
-/// - +0x18: SESS_WIDTH      (frame width in pixels)
-/// - +0x1C: SESS_HEIGHT     (frame height in pixels)
-/// - +0x20: SESS_PIXEL_FMT  (input/output pixel format)
-/// - +0x24: SESS_BITRATE    (target bitrate for encoding, Kbps)
-/// - +0x28: SESS_QP         (quantization parameter / CRF value)
-/// - +0x2C: SESS_RC_MODE    (rate control mode)
-/// - +0x30: SESS_FPS        (framerate numerator)
-/// - +0x34: SESS_FPS_DEN    (framerate denominator)
-/// - +0x38: SESS_GOP_SIZE   (group of pictures size for encoding)
-/// - +0x3C: SESS_REF_FRAMES (max reference frames)
-/// - +0x40: SESS_PROFILE    (codec profile)
-/// - +0x44: SESS_LEVEL      (codec level)
-/// - +0x48: SESS_BYTES_DONE (bytes processed, read-only)
-/// - +0x4C: SESS_FRAMES_DONE (frames processed, read-only)
+/// - +0x08: SESS_STATUS     (idle/busy/done/error, progress)
+/// - +0x10: SESS_SRC_ADDR   (source buffer DMA address)
+/// - +0x18: SESS_SRC_SIZE   (source buffer size in bytes)
+/// - +0x20: SESS_DST_ADDR   (destination buffer DMA address)
+/// - +0x28: SESS_DST_SIZE   (destination buffer size / bytes written)
+/// - +0x30: SESS_WIDTH      (frame width in pixels)
+/// - +0x38: SESS_HEIGHT     (frame height in pixels)
+/// - +0x40: SESS_PIXEL_FMT  (input/output pixel format)
+/// - +0x48: SESS_BITRATE    (target bitrate for encoding, Kbps)
+/// - +0x50: SESS_QP         (quantization parameter / CRF value)
+/// - +0x58: SESS_RC_MODE    (rate control mode)
+/// - +0x60: SESS_FPS        (framerate numerator)
+/// - +0x68: SESS_FPS_DEN    (framerate denominator)
+/// - +0x70: SESS_GOP_SIZE   (group of pictures size for encoding)
+/// - +0x78: SESS_REF_FRAMES (max reference frames)
+/// - +0x80: SESS_PROFILE    (codec profile)
+/// - +0x88: SESS_LEVEL      (codec level)
+/// - +0x90: SESS_BYTES_DONE (bytes processed, read-only)
+/// - +0x98: SESS_FRAMES_DONE (frames processed, read-only)
 class HarborMediaEngine extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -927,15 +929,13 @@ class HarborMediaEngine extends BridgeModule
                       ),
                     ]),
                     // ENGINE_STATUS
-                    CaseItem(Const(0x04 >> 2, width: 8), [
+                    CaseItem(Const(0x08, width: 8), [
                       bus.dataOut < engineStatus,
                     ]),
                     // ENGINE_CAPS
-                    CaseItem(Const(0x08 >> 2, width: 8), [
-                      bus.dataOut < engineCaps,
-                    ]),
+                    CaseItem(Const(0x10, width: 8), [bus.dataOut < engineCaps]),
                     // INT_STATUS
-                    CaseItem(Const(0x10 >> 2, width: 8), [
+                    CaseItem(Const(0x20, width: 8), [
                       If(
                         bus.we,
                         then: [
@@ -947,7 +947,7 @@ class HarborMediaEngine extends BridgeModule
                       ),
                     ]),
                     // INT_ENABLE
-                    CaseItem(Const(0x14 >> 2, width: 8), [
+                    CaseItem(Const(0x28, width: 8), [
                       If(
                         bus.we,
                         then: [intEnable < bus.dataIn.getRange(0, maxSessions)],
@@ -958,13 +958,15 @@ class HarborMediaEngine extends BridgeModule
                 ],
               ),
 
-              // Per-session registers: session N at word 0x40 + N*0x20, so
-              // bits [11:5] select the session and [4:0] the sub-register.
+              // Per-session registers: session N at byte 0x100 + N*0x100, so
+              // bits [11:8] select the session and [7:0] the sub-register. The
+              // block is 0x100, not 0x20: at 8-byte slots the session registers
+              // span 0x98 and a 0x20 block put them in the next session's.
               for (var i = 0; i < maxSessions; i++)
                 If(
-                  bus.addr.getRange(5, 12).eq(Const(2 + i, width: 7)),
+                  bus.addr.getRange(8, 12).eq(Const(1 + i, width: 4)),
                   then: [
-                    Case(bus.addr.getRange(0, 5), [
+                    Case(bus.addr.getRange(0, 8), [
                       // +0x00 SESS_CTRL ([0] start, [1] direction, [2] size
                       // (0=4x4 1=8x8), [3] dequant enable, [4] entropy-decode
                       // source, [5] intra-predict enable, [6] inter-predict
@@ -983,67 +985,67 @@ class HarborMediaEngine extends BridgeModule
                       // Transform type
                       // 0=DCT 1=ADST 2=FLIPADST 3=IDTX. SESS_SRC_SIZE doubles
                       // as the neighbour / reference-patch buffer address.
-                      CaseItem(Const(0x00, width: 5), [
+                      CaseItem(Const(0x00, width: 8), [
                         If(
                           bus.we,
                           then: [sessCtrl[i] < bus.dataIn],
                           orElse: [bus.dataOut < sessCtrl[i]],
                         ),
                       ]),
-                      // +0x04 SESS_STATUS (read-only: [0] busy, [1] done)
-                      CaseItem(Const(0x01, width: 5), [
+                      // +0x08 SESS_STATUS (read-only: [0] busy, [1] done)
+                      CaseItem(Const(0x08, width: 8), [
                         bus.dataOut < sessStatus[i],
                       ]),
-                      // +0x08 SESS_SRC_ADDR
-                      CaseItem(Const(0x02, width: 5), [
+                      // +0x10 SESS_SRC_ADDR
+                      CaseItem(Const(0x10, width: 8), [
                         If(
                           bus.we,
                           then: [sessSrcAddr[i] < busToAddr(bus.dataIn)],
                           orElse: [bus.dataOut < addrToBus(sessSrcAddr[i])],
                         ),
                       ]),
-                      // +0x0C SESS_SRC_SIZE
-                      CaseItem(Const(0x03, width: 5), [
+                      // +0x18 SESS_SRC_SIZE
+                      CaseItem(Const(0x18, width: 8), [
                         If(
                           bus.we,
                           then: [sessSrcSize[i] < bus.dataIn],
                           orElse: [bus.dataOut < sessSrcSize[i]],
                         ),
                       ]),
-                      // +0x10 SESS_DST_ADDR
-                      CaseItem(Const(0x04, width: 5), [
+                      // +0x20 SESS_DST_ADDR
+                      CaseItem(Const(0x20, width: 8), [
                         If(
                           bus.we,
                           then: [sessDstAddr[i] < busToAddr(bus.dataIn)],
                           orElse: [bus.dataOut < addrToBus(sessDstAddr[i])],
                         ),
                       ]),
-                      // +0x14 SESS_DST_SIZE
-                      CaseItem(Const(0x05, width: 5), [
+                      // +0x28 SESS_DST_SIZE
+                      CaseItem(Const(0x28, width: 8), [
                         If(
                           bus.we,
                           then: [sessDstSize[i] < bus.dataIn],
                           orElse: [bus.dataOut < sessDstSize[i]],
                         ),
                       ]),
-                      // +0x18 SESS_WIDTH
-                      CaseItem(Const(0x06, width: 5), [
+                      // +0x30 SESS_WIDTH
+                      CaseItem(Const(0x30, width: 8), [
                         If(
                           bus.we,
                           then: [sessWidth[i] < bus.dataIn.getRange(0, 16)],
                           orElse: [bus.dataOut < sessWidth[i].zeroExtend(32)],
                         ),
                       ]),
-                      // +0x1C SESS_HEIGHT
-                      CaseItem(Const(0x07, width: 5), [
+                      // +0x38 SESS_HEIGHT
+                      CaseItem(Const(0x38, width: 8), [
                         If(
                           bus.we,
                           then: [sessHeight[i] < bus.dataIn.getRange(0, 16)],
                           orElse: [bus.dataOut < sessHeight[i].zeroExtend(32)],
                         ),
                       ]),
-                      // +0x20 SESS_REF_STRIDE (gather: ref-frame samples/row)
-                      CaseItem(Const(0x08, width: 5), [
+                      // +0x40 SESS_REF_STRIDE (gather: ref-frame samples/row)
+                      CaseItem(Const(0x40, width: 8), [
                         If(
                           bus.we,
                           then: [sessRefStride[i] < bus.dataIn.getRange(0, 16)],
@@ -1052,20 +1054,20 @@ class HarborMediaEngine extends BridgeModule
                           ],
                         ),
                       ]),
-                      // +0x28 SESS_QP (dequantizer index)
-                      CaseItem(Const(0x0A, width: 5), [
+                      // +0x50 SESS_QP (dequantizer index)
+                      CaseItem(Const(0x50, width: 8), [
                         If(
                           bus.we,
                           then: [sessQp[i] < bus.dataIn.getRange(0, 8)],
                           orElse: [bus.dataOut < sessQp[i].zeroExtend(32)],
                         ),
                       ]),
-                      // +0x48 SESS_BYTES_DONE (read-only)
-                      CaseItem(Const(0x12, width: 5), [
+                      // +0x90 SESS_BYTES_DONE (read-only)
+                      CaseItem(Const(0x90, width: 8), [
                         bus.dataOut < sessBytesDone[i],
                       ]),
-                      // +0x4C SESS_FRAMES_DONE (read-only)
-                      CaseItem(Const(0x13, width: 5), [
+                      // +0x98 SESS_FRAMES_DONE (read-only)
+                      CaseItem(Const(0x98, width: 8), [
                         bus.dataOut < sessFramesDone[i],
                       ]),
                     ]),

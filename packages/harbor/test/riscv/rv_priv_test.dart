@@ -12,8 +12,8 @@ void main() {
       expect(rvPriv.misaBit, isNull);
     });
 
-    test('has 3 operations', () {
-      expect(rvPriv.operations, hasLength(3));
+    test('has 4 operations', () {
+      expect(rvPriv.operations, hasLength(4));
     });
 
     test('sret uses system opcode with funct7 0x08', () {
@@ -56,6 +56,26 @@ void main() {
       expect(wfi.microcode, hasLength(2));
       expect(wfi.microcode.first, isA<RiscVWaitForInterrupt>());
       final upd = wfi.microcode[1];
+      expect(upd, isA<RiscVUpdatePc>());
+      expect((upd as RiscVUpdatePc).offset, equals(4));
+    });
+
+    test('sfence.vma uses system opcode with funct7 0x09', () {
+      final s = rvPriv.operations.firstWhere(
+        (op) => op.mnemonic == 'sfence.vma',
+      );
+      expect(s.opcode, equals(RiscvOpcode.system));
+      expect(s.funct7, equals(0x09));
+      expect(s.privilegeLevel, equals(1));
+    });
+
+    test('sfence.vma microcode fences the TLB then advances pc+4', () {
+      final s = rvPriv.operations.firstWhere(
+        (op) => op.mnemonic == 'sfence.vma',
+      );
+      expect(s.microcode, hasLength(2));
+      expect(s.microcode.first, isA<RiscVTlbFenceOp>());
+      final upd = s.microcode[1];
       expect(upd, isA<RiscVUpdatePc>());
       expect((upd as RiscVUpdatePc).offset, equals(4));
     });

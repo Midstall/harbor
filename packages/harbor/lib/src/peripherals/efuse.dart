@@ -180,17 +180,19 @@ class HarborEfuseBlock extends BridgeModule {
 /// software access. Provides address/data registers, status,
 /// region locking, and a programming unlock key.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: CTRL       (bit 0: read start, bit 1: program start,
 ///                      bits 11:8: region select)
-/// - 0x04: STATUS     (bit 0: busy, bit 1: done, bit 2: error,
+/// - 0x08: STATUS     (bit 0: busy, bit 1: done, bit 2: error,
 ///                      bit 3: unlocked)
-/// - 0x08: ADDR       (word address within the fuse bank)
-/// - 0x0C: RDATA      (read data, valid after read completes)
-/// - 0x10: WDATA      (write data, latched on program start)
-/// - 0x14: LOCK       (per-region lock bits, write-1-to-lock)
-/// - 0x18: TIMING     (program pulse width in clock cycles)
-/// - 0x1C: KEY        (write 0x4F545021 to unlock programming)
+/// - 0x10: ADDR       (word address within the fuse bank)
+/// - 0x18: RDATA      (read data, valid after read completes)
+/// - 0x20: WDATA      (write data, latched on program start)
+/// - 0x28: LOCK       (per-region lock bits, write-1-to-lock)
+/// - 0x30: TIMING     (program pulse width in clock cycles)
+/// - 0x38: KEY        (write 0x4F545021 to unlock programming)
 class HarborEfuseDevice extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -347,9 +349,9 @@ class HarborEfuseDevice extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              Case(bus.addr.getRange(0, 5), [
+              Case(bus.addr.getRange(0, 6), [
                 // CTRL
-                CaseItem(Const(0x00, width: 5), [
+                CaseItem(Const(0x00, width: 6), [
                   If(
                     bus.we,
                     then: [
@@ -362,7 +364,7 @@ class HarborEfuseDevice extends BridgeModule
                   ),
                 ]),
                 // STATUS
-                CaseItem(Const(0x04 >> 2, width: 5), [
+                CaseItem(Const(0x08, width: 6), [
                   bus.dataOut <
                       [
                         Const(0, width: 28),
@@ -378,7 +380,7 @@ class HarborEfuseDevice extends BridgeModule
                   ),
                 ]),
                 // ADDR
-                CaseItem(Const(0x08 >> 2, width: 5), [
+                CaseItem(Const(0x10, width: 6), [
                   If(
                     bus.we,
                     then: [
@@ -388,11 +390,11 @@ class HarborEfuseDevice extends BridgeModule
                   ),
                 ]),
                 // RDATA
-                CaseItem(Const(0x0C >> 2, width: 5), [
+                CaseItem(Const(0x18, width: 6), [
                   bus.dataOut < rdata.zeroExtend(32),
                 ]),
                 // WDATA
-                CaseItem(Const(0x10 >> 2, width: 5), [
+                CaseItem(Const(0x20, width: 6), [
                   If(
                     bus.we,
                     then: [wdata < bus.dataIn.getRange(0, config.bitsPerWord)],
@@ -400,7 +402,7 @@ class HarborEfuseDevice extends BridgeModule
                   ),
                 ]),
                 // LOCK (write-1-to-lock)
-                CaseItem(Const(0x14 >> 2, width: 5), [
+                CaseItem(Const(0x28, width: 6), [
                   If(
                     bus.we,
                     then: [
@@ -411,7 +413,7 @@ class HarborEfuseDevice extends BridgeModule
                   ),
                 ]),
                 // TIMING
-                CaseItem(Const(0x18 >> 2, width: 5), [
+                CaseItem(Const(0x30, width: 6), [
                   If(
                     bus.we,
                     then: [timing < bus.dataIn.getRange(0, 16)],
@@ -419,7 +421,7 @@ class HarborEfuseDevice extends BridgeModule
                   ),
                 ]),
                 // KEY
-                CaseItem(Const(0x1C >> 2, width: 5), [
+                CaseItem(Const(0x38, width: 6), [
                   If(
                     bus.we,
                     then: [

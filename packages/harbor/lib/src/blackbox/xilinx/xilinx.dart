@@ -186,6 +186,8 @@ class XilinxDdr3Clocks {
     required this.controllerMhz,
     required this.idelayRefMhz,
     required this.vcoMhz,
+    required this.controllerClk,
+    required this.controllerClkMhz,
     this.coreClk,
     this.coreClkMhz,
   });
@@ -193,9 +195,18 @@ class XilinxDdr3Clocks {
   /// Fast DDR CK (~333 MHz), the ISERDESE2/OSERDESE2 CLK.
   final Logic ddrCk;
 
-  /// Controller / CLKDIV clock (= DDR CK / 4, ~83 MHz), the fabric clock the
-  /// sequencer and the SERDES CLKDIV run on.
+  /// Controller / CLKDIV clock (= DDR CK / 4, ~83 MHz), the SERDES CLKDIV +
+  /// (at gearRatio 1) the sequencer clock. When the DDR runs a CK/8 controller
+  /// (gearRatio 2) this stays CK/4 and feeds only the SERDES (HarborDdr3's
+  /// `ddr_serdes_clk`); the sequencer moves to [controllerClk].
   final Logic controller;
+
+  /// Controller-LOGIC clock the Ddr3Controller sequencer runs on. Equals
+  /// [controller] (CK/4) at gearRatio 1 (byte-identical); at gearRatio 2 it is a
+  /// CK/8 clock off the SAME VCO on the spare CLKOUT5 (integer 2:1 to CK/4, which
+  /// the fabric gearbox requires), buying the congestion-limited command
+  /// scheduler timing margin while the SERDES stays on [controller].
+  final Logic controllerClk;
 
   /// IDELAYCTRL reference (~200 MHz). Must match the IDELAYE2 REFCLK_FREQUENCY
   /// or the taps never calibrate (RDY stays low).
@@ -222,6 +233,10 @@ class XilinxDdr3Clocks {
 
   final double ddrCkMhz;
   final double controllerMhz;
+
+  /// Realised [controllerClk] rate (= [controllerMhz] at gearRatio 1, half it at
+  /// gearRatio 2).
+  final double controllerClkMhz;
   final double idelayRefMhz;
   final double vcoMhz;
   final double? coreClkMhz;
@@ -246,12 +261,17 @@ class XilinxDdr3TreeSpec {
   /// Slow SoC/core clock in Hz, emitted on the tree's spare CLKOUT5.
   final int coreClkHz;
 
+  /// DDR controller-logic gearing (1 = CK/4 controller, 2 = CK/8 controller on
+  /// the spare CLKOUT5). Forwarded to [buildXilinxDdr3ClockTree].
+  final int ddrGearRatio;
+
   const XilinxDdr3TreeSpec({
     required this.sourceHz,
     required this.ddrCkHz,
     required this.coreClkHz,
     this.idelayRefHz = 200000000,
     this.dqsPhaseDeg = 180.0,
+    this.ddrGearRatio = 1,
   });
 }
 
@@ -359,6 +379,11 @@ XilinxDdr3Clocks buildXilinxDdr3ClockTree(
   // openXC7). The divide is round(VCO / coreClkHz), clamped to the 1..128
   // CLKOUT range. The realised rate is exposed as [XilinxDdr3Clocks.coreClkMhz].
   int? coreClkHz,
+  // DDR controller-logic gearing. 1 = the controller runs on CK/4 ([controller]).
+  // 2 = a CK/8 controller: emit the spare CLKOUT5 as CK/8 (integer 2x the CK/4
+  // divide, same VCO -> phase-locked 2:1) and return it as [controllerClk]. The
+  // CK/8 controller needs the fabric gearbox (HarborDdr3 controllerGearRatio 2).
+  int ddrGearRatio = 1,
   String name = 'ddr3clk',
 }) {
   final sol = solveDdr3ClockTree(sourceHz, ddrCkHz, idelayRefHz);
@@ -368,8 +393,27 @@ XilinxDdr3Clocks buildXilinxDdr3ClockTree(
       'ddrCk=$ddrCkHz idelayRef=$idelayRefHz (VCO 600-1200 MHz unreachable).',
     );
   }
+  final geared = ddrGearRatio > 1;
+  if (geared && coreClkHz != null) {
+    throw StateError(
+      'DDR gearRatio $ddrGearRatio uses the spare CLKOUT5 for the CK/8 '
+      'controller clock, but coreClkHz occupies it. Drive the core from a '
+      'separate PLL (buildXilinxCorePll) so CLKOUT5 is free.',
+    );
+  }
+  // CK/8 controller divide off the SAME VCO on CLKOUT5 (integer 2x the CK/4
+  // ctrl divide, so CK/8 is a clean integer divide phase-locked to CK/4). Valid
+  // for any ctrlDivide <= 64 (CLKOUT range is 1..128).
+  final ctrlGearDivide = geared ? ddrGearRatio * sol.ctrlDivide : null;
+  if (ctrlGearDivide != null && (ctrlGearDivide < 1 || ctrlGearDivide > 128)) {
+    throw StateError(
+      'DDR gearRatio $ddrGearRatio CK/${4 * ddrGearRatio} divide '
+      '$ctrlGearDivide is out of the CLKOUT 1..128 range.',
+    );
+  }
   // Optional core-clock divide off the same VCO (CLKOUT5). round() lands the
-  // nearest integer, clamp to the PLLE2 CLKOUT 1..128 range.
+  // nearest integer, clamp to the PLLE2 CLKOUT 1..128 range. Mutually exclusive
+  // with [ctrlGearDivide] (both would claim CLKOUT5; asserted above).
   final coreDivide = coreClkHz == null
       ? null
       : (sol.vco / coreClkHz).round().clamp(1, 128);
@@ -392,8 +436,9 @@ XilinxDdr3Clocks buildXilinxDdr3ClockTree(
       // default 180 = oracle !i_ddr3_clk).
       clkout4Divide: sol.ckDivide.round(),
       clkout4Phase: dqsPhaseDeg,
-      // CLKOUT5 = slow SoC/core clock (optional).
-      clkout5Divide: coreDivide,
+      // CLKOUT5 = slow SoC/core clock (optional) OR the CK/8 controller clock
+      // when geared (mutually exclusive).
+      clkout5Divide: coreDivide ?? ctrlGearDivide,
       name: '${name}_pll',
     ),
   );
@@ -416,9 +461,18 @@ XilinxDdr3Clocks buildXilinxDdr3ClockTree(
   // dedicated routes, while BUFHs are fed from BUFGs/CMT, so CLKOUTn -> BUFHCE.I
   // fails to route on nextpnr-xilinx ("Failed to route arc of net CLKOUTx").
   // Every PLL output therefore stays on its own global BUFG.
+  // CK/4 SERDES/CLKDIV clock (also the sequencer clock at gearRatio 1).
+  final ctrlNet = bufOut('CLKOUT1', 'ctrl');
+  // CK/8 controller-logic clock on the spare CLKOUT5, only when geared.
+  final ctrlGearNet = geared ? bufOut('CLKOUT5', 'ctrlgear') : null;
   return XilinxDdr3Clocks(
     ddrCk: bufOut('CLKOUT0', 'ck'),
-    controller: bufOut('CLKOUT1', 'ctrl'),
+    controller: ctrlNet,
+    // gearRatio 1: the sequencer clock IS CK/4 (same net, byte-identical).
+    controllerClk: ctrlGearNet ?? ctrlNet,
+    controllerClkMhz: ctrlGearDivide == null
+        ? sol.vco / sol.ctrlDivide / 1e6
+        : sol.vco / ctrlGearDivide / 1e6,
     idelayRef: bufOut('CLKOUT2', 'idelayref'),
     ddrCk90: bufOut('CLKOUT3', 'ck90'),
     ddrCkDqs: bufOut('CLKOUT4', 'ckdqs'),
@@ -427,7 +481,8 @@ XilinxDdr3Clocks buildXilinxDdr3ClockTree(
     controllerMhz: sol.vco / sol.ctrlDivide / 1e6,
     idelayRefMhz: sol.vco / sol.refDivide / 1e6,
     vcoMhz: sol.vco / 1e6,
-    // Core clock on its own global BUFG (CLKOUT5), only when requested.
+    // Core clock on its own global BUFG (CLKOUT5), only when requested (never
+    // together with the geared controller clock; asserted above).
     coreClk: coreDivide == null ? null : bufOut('CLKOUT5', 'core'),
     coreClkMhz: coreDivide == null ? null : sol.vco / coreDivide / 1e6,
   );

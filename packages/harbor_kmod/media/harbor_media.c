@@ -6,15 +6,20 @@
  * out-of-the-box FFmpeg/GStreamer/Chromium support.
  * Falls back to miscdevice + ioctl when V4L2 M2M is not available.
  *
- * Global registers:
- *   0x000: ENGINE_CTRL   0x004: ENGINE_STATUS  0x008: ENGINE_CAPS
- *   0x00C: ENGINE_VER    0x010: INT_STATUS      0x014: INT_ENABLE
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour.
  *
- * Per-session (0x100 + session*0x80):
- *   +0x00: SESS_CTRL     +0x04: SESS_STATUS   +0x08: SESS_SRC_ADDR
- *   +0x0C: SESS_SRC_SIZE +0x10: SESS_DST_ADDR +0x14: SESS_DST_SIZE
- *   +0x18: SESS_WIDTH    +0x1C: SESS_HEIGHT   +0x20: SESS_PIXEL_FMT
- *   +0x24: SESS_BITRATE  +0x28: SESS_QP       +0x2C: SESS_RC_MODE
+ * Global registers:
+ *   0x000: ENGINE_CTRL   0x008: ENGINE_STATUS  0x010: ENGINE_CAPS
+ *   0x018: ENGINE_VER    0x020: INT_STATUS     0x028: INT_ENABLE
+ *
+ * Per-session (0x100 + session*0x100):
+ *   +0x00: SESS_CTRL     +0x08: SESS_STATUS   +0x10: SESS_SRC_ADDR
+ *   +0x18: SESS_SRC_SIZE +0x20: SESS_DST_ADDR +0x28: SESS_DST_SIZE
+ *   +0x30: SESS_WIDTH    +0x38: SESS_HEIGHT   +0x40: SESS_PIXEL_FMT
+ *   +0x48: SESS_BITRATE  +0x50: SESS_QP       +0x58: SESS_RC_MODE
  */
 
 #include <linux/module.h>
@@ -33,16 +38,16 @@
 #endif
 
 #define HARBOR_MEDIA_ENGINE_CTRL   0x000
-#define HARBOR_MEDIA_ENGINE_STATUS 0x004
-#define HARBOR_MEDIA_ENGINE_CAPS   0x008
-#define HARBOR_MEDIA_INT_STATUS	   0x010
-#define HARBOR_MEDIA_INT_ENABLE	   0x014
+#define HARBOR_MEDIA_ENGINE_STATUS 0x008
+#define HARBOR_MEDIA_ENGINE_CAPS   0x010
+#define HARBOR_MEDIA_INT_STATUS	   0x020
+#define HARBOR_MEDIA_INT_ENABLE	   0x028
 
 #define HARBOR_MEDIA_SESS_BASE	   0x100
-#define HARBOR_MEDIA_SESS_STRIDE   0x80
+#define HARBOR_MEDIA_SESS_STRIDE   0x100
 #define HARBOR_MEDIA_SESS_CTRL	   0x00
-#define HARBOR_MEDIA_SESS_STATUS   0x04
-#define HARBOR_MEDIA_SESS_SRC_ADDR 0x08
+#define HARBOR_MEDIA_SESS_STATUS   0x08
+#define HARBOR_MEDIA_SESS_SRC_ADDR 0x10
 
 #define HARBOR_SESS_START  BIT(0)
 #define HARBOR_SESS_DECODE (0 << 4)

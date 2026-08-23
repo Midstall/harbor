@@ -25,9 +25,9 @@ void main() {
       final tb = PeripheralTestBench(eth);
       await tb.init();
 
-      // MAC_ADDR_LO word addr 2
-      await tb.write(2, 0xAABBCCDD);
-      final val = await tb.read(2);
+      // MAC_ADDR_LO byte offset 0x10
+      await tb.write(0x10, 0xAABBCCDD);
+      final val = await tb.read(0x10);
       expect(val, equals(0xAABBCCDD));
 
       await Simulator.endSimulation();
@@ -48,9 +48,9 @@ void main() {
       final tb = PeripheralTestBench(eth);
       await tb.init();
 
-      // MAC_ADDR_HI word addr 3
-      await tb.write(3, 0xEEFF);
-      final val = await tb.read(3);
+      // MAC_ADDR_HI byte offset 0x18
+      await tb.write(0x18, 0xEEFF);
+      final val = await tb.read(0x18);
       expect(val, equals(0xEEFF));
 
       await Simulator.endSimulation();
@@ -71,9 +71,9 @@ void main() {
       final tb = PeripheralTestBench(eth);
       await tb.init();
 
-      // MAC_CTRL word addr 0, bit 0 = enable
-      await tb.write(0, 0x01);
-      final val = await tb.read(0);
+      // MAC_CTRL byte offset 0x00, bit 0 = enable
+      await tb.write(0x00, 0x01);
+      final val = await tb.read(0x00);
       expect(val & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -94,8 +94,8 @@ void main() {
       final tb = PeripheralTestBench(eth);
       await tb.init();
 
-      // MAC_STATUS word addr 1
-      final val = await tb.read(1);
+      // MAC_STATUS byte offset 0x08
+      final val = await tb.read(0x08);
       // After reset: tx_enable=0, rx_enable=0
       expect(val & 0x03, equals(0));
 
@@ -117,9 +117,9 @@ void main() {
       final tb = PeripheralTestBench(eth);
       await tb.init();
 
-      // INT_ENABLE word addr 5 (0x014 >> 2)
-      await tb.write(5, 0x3F);
-      final val = await tb.read(5);
+      // INT_ENABLE byte offset 0x28
+      await tb.write(0x28, 0x3F);
+      final val = await tb.read(0x28);
       expect(val, equals(0x3F));
 
       await Simulator.endSimulation();

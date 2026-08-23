@@ -13,13 +13,15 @@ import '../soc/svd.dart';
 /// or interrupt. Supports windowed mode where kicking too early
 /// is also a fault.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: CTRL    (enable, reset_en, irq_en, window_en)
-/// - 0x04: STATUS  (running, expired)
-/// - 0x08: TIMEOUT (timeout value in clock cycles)
-/// - 0x0C: WINDOW  (minimum kick interval, windowed mode)
-/// - 0x10: KICK    (write magic value 0x4B494B to kick)
-/// - 0x14: COUNT   (current counter value, read-only)
+/// - 0x08: STATUS  (running, expired)
+/// - 0x10: TIMEOUT (timeout value in clock cycles)
+/// - 0x18: WINDOW  (minimum kick interval, windowed mode)
+/// - 0x20: KICK    (write magic value 0x4B494B to kick)
+/// - 0x28: COUNT   (current counter value, read-only)
 ///
 /// Magic kick value prevents accidental kicks from stray writes.
 class HarborWatchdog extends BridgeModule
@@ -117,9 +119,9 @@ class HarborWatchdog extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              Case(bus.addr.getRange(0, 3), [
+              Case(bus.addr.getRange(0, 6), [
                 // 0x00: CTRL
-                CaseItem(Const(0, width: 3), [
+                CaseItem(Const(0x00, width: 6), [
                   If(
                     bus.we,
                     then: [
@@ -137,30 +139,30 @@ class HarborWatchdog extends BridgeModule
                     ],
                   ),
                 ]),
-                // 0x04: STATUS
-                CaseItem(Const(1, width: 3), [
+                // 0x08: STATUS
+                CaseItem(Const(0x08, width: 6), [
                   bus.dataOut <
                       enable.zeroExtend(32) |
                           (expired.zeroExtend(32) << Const(1, width: 32)),
                 ]),
-                // 0x08: TIMEOUT
-                CaseItem(Const(2, width: 3), [
+                // 0x10: TIMEOUT
+                CaseItem(Const(0x10, width: 6), [
                   If(
                     bus.we,
                     then: [timeout < bus.dataIn.getRange(0, counterWidth)],
                     orElse: [bus.dataOut < timeout.zeroExtend(32)],
                   ),
                 ]),
-                // 0x0C: WINDOW
-                CaseItem(Const(3, width: 3), [
+                // 0x18: WINDOW
+                CaseItem(Const(0x18, width: 6), [
                   If(
                     bus.we,
                     then: [window < bus.dataIn.getRange(0, counterWidth)],
                     orElse: [bus.dataOut < window.zeroExtend(32)],
                   ),
                 ]),
-                // 0x10: KICK (write magic to reset counter)
-                CaseItem(Const(4, width: 3), [
+                // 0x20: KICK (write magic to reset counter)
+                CaseItem(Const(0x20, width: 6), [
                   If(
                     bus.we,
                     then: [
@@ -186,8 +188,8 @@ class HarborWatchdog extends BridgeModule
                     ],
                   ),
                 ]),
-                // 0x14: COUNT (read-only)
-                CaseItem(Const(5, width: 3), [
+                // 0x28: COUNT (read-only)
+                CaseItem(Const(0x28, width: 6), [
                   bus.dataOut < count.zeroExtend(32),
                 ]),
               ]),

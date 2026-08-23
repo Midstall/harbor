@@ -531,13 +531,16 @@ void main() {
   });
 
   group('HarborMediaEngine transform', () {
-    // Global register word indices.
-    const engCtrl = 0;
-    const intStatus = 4;
-    // Session 0 registers (word 0x40 + sub-register).
-    const s0Ctrl = 0x40;
-    const s0Src = 0x42;
-    const s0Dst = 0x44;
+    // Global register BYTE offsets.
+    const engCtrl = 0x00;
+    const intStatus = 0x20;
+    // Session 0 registers: the session block is byte 0x100 + N*0x100, and each
+    // register is its own 8-byte slot.
+    const s0Base = 0x100;
+    const s0Ctrl = s0Base + 0x00;
+    const s0Src = s0Base + 0x10;
+    const s0Dst = s0Base + 0x20;
+    const s0Qp = s0Base + 0x50;
     const dstWord = 8; // dst byte 0x80
 
     late HarborMediaEngine eng;
@@ -679,7 +682,7 @@ void main() {
       await bw(engCtrl, 0x1); // enable
       await bw(s0Src, 0x00);
       await bw(s0Dst, dstWord * 16);
-      if (deq) await bw(s0Ctrl + 0x0A, qp); // SESS_QP
+      if (deq) await bw(s0Qp, qp); // SESS_QP
       // SESS_CTRL: start | dir<<1 | size<<2 | deq<<3 | hType<<8 | vType<<10
       await bw(
         s0Ctrl,
@@ -925,13 +928,13 @@ void main() {
           return v;
         }
 
-        await bw(0, 0x1); // enable engine
-        await bw(0x42, 0x0); // SESS_SRC_ADDR
-        await bw(0x44, 0x80); // SESS_DST_ADDR (word 8)
+        await bw(0x00, 0x1); // enable engine
+        await bw(0x110, 0x0); // SESS_SRC_ADDR
+        await bw(0x120, 0x80); // SESS_DST_ADDR (memory word 8)
         // SESS_CTRL: start | inverse | entropy-decode source, 4x4 DCT
-        await bw(0x40, 0x1 | (1 << 1) | (1 << 4));
+        await bw(0x100, 0x1 | (1 << 1) | (1 << 4));
         for (var i = 0; i < 800; i++) {
-          if ((await br(4)) & 0x1 == 0x1) break;
+          if ((await br(0x20)) & 0x1 == 0x1) break;
         }
 
         // Reference: decode the 4x4 coefficient block then inverse DCT.
@@ -1059,13 +1062,13 @@ void main() {
           return v;
         }
 
-        await bw(0, 0x1); // enable
-        await bw(0x42, 0x0); // SESS_SRC_ADDR
-        await bw(0x44, 0x80); // SESS_DST_ADDR (word 8)
+        await bw(0x00, 0x1); // enable
+        await bw(0x110, 0x0); // SESS_SRC_ADDR
+        await bw(0x120, 0x80); // SESS_DST_ADDR (memory word 8)
         // start | inverse | entropy-decode source, 4x4 DCT
-        await bw(0x40, 0x1 | (1 << 1) | (1 << 4));
+        await bw(0x100, 0x1 | (1 << 1) | (1 << 4));
         for (var i = 0; i < 800; i++) {
-          if ((await br(4)) & 0x1 == 0x1) break;
+          if ((await br(0x20)) & 0x1 == 0x1) break;
         }
 
         // Reference: od_ec coefficient decode (from the raw bytes) then inverse DCT.
@@ -1195,13 +1198,13 @@ void main() {
         return v;
       }
 
-      await bw(0, 0x1); // enable
-      await bw(0x42, 0x0); // SESS_SRC_ADDR
-      await bw(0x44, 0x80); // SESS_DST_ADDR (word 8)
+      await bw(0x00, 0x1); // enable
+      await bw(0x110, 0x0); // SESS_SRC_ADDR
+      await bw(0x120, 0x80); // SESS_DST_ADDR (memory word 8)
       // start | inverse | entropy-decode | AV1 scan order (bit 27), 4x4 DCT
-      await bw(0x40, 0x1 | (1 << 1) | (1 << 4) | (1 << 27));
+      await bw(0x100, 0x1 | (1 << 1) | (1 << 4) | (1 << 27));
       for (var i = 0; i < 800; i++) {
-        if ((await br(4)) & 0x1 == 0x1) break;
+        if ((await br(0x20)) & 0x1 == 0x1) break;
       }
 
       // Reference: decode in order, then scatter via the AV1 4x4 diagonal scan
@@ -1346,13 +1349,13 @@ void main() {
         return v;
       }
 
-      await bw(0, 0x1); // enable
-      await bw(0x42, 0x0); // SESS_SRC_ADDR
-      await bw(0x44, 0x80); // SESS_DST_ADDR (word 8)
+      await bw(0x00, 0x1); // enable
+      await bw(0x110, 0x0); // SESS_SRC_ADDR
+      await bw(0x120, 0x80); // SESS_DST_ADDR (memory word 8)
       // start | inverse | size 8x8 | entropy-decode source, DCT
-      await bw(0x40, 0x1 | (1 << 1) | (1 << 2) | (1 << 4));
+      await bw(0x100, 0x1 | (1 << 1) | (1 << 2) | (1 << 4));
       for (var i = 0; i < 1200; i++) {
-        if ((await br(4)) & 0x1 == 0x1) break;
+        if ((await br(0x20)) & 0x1 == 0x1) break;
       }
 
       final coeffs = _decodeBlock(bits, 64);
@@ -1480,14 +1483,14 @@ void main() {
         return v;
       }
 
-      await bw(0, 0x1); // enable
-      await bw(0x42, 0x0); // SESS_SRC_ADDR
-      await bw(0x44, 0x80); // SESS_DST_ADDR (word 8)
-      await bw(0x4A, 6); // SESS_QP
+      await bw(0x00, 0x1); // enable
+      await bw(0x110, 0x0); // SESS_SRC_ADDR
+      await bw(0x120, 0x80); // SESS_DST_ADDR (memory word 8)
+      await bw(0x150, 6); // SESS_QP
       // start | inverse | dequant enable | entropy-decode source, 4x4 DCT
-      await bw(0x40, 0x1 | (1 << 1) | (1 << 3) | (1 << 4));
+      await bw(0x100, 0x1 | (1 << 1) | (1 << 3) | (1 << 4));
       for (var i = 0; i < 800; i++) {
-        if ((await br(4)) & 0x1 == 0x1) break;
+        if ((await br(0x20)) & 0x1 == 0x1) break;
       }
 
       // Reference: decode coefficients, dequantize, then inverse DCT.
@@ -1642,14 +1645,14 @@ void main() {
           return v;
         }
 
-        await bw(0, 0x1); // enable
-        await bw(0x42, 0x0); // SESS_SRC_ADDR (coefficients)
-        await bw(0x43, 0x40); // SESS_SRC_SIZE = neighbour address (word 4)
-        await bw(0x44, 0x80); // SESS_DST_ADDR (word 8)
+        await bw(0x00, 0x1); // enable
+        await bw(0x110, 0x0); // SESS_SRC_ADDR (coefficients)
+        await bw(0x118, 0x40); // SESS_SRC_SIZE = neighbour address (word 4)
+        await bw(0x120, 0x80); // SESS_DST_ADDR (memory word 8)
         // start | inverse | predict-enable | intra mode m, 4x4 DCT
-        await bw(0x40, 0x1 | (1 << 1) | (1 << 5) | (m << 13));
+        await bw(0x100, 0x1 | (1 << 1) | (1 << 5) | (m << 13));
         for (var i = 0; i < 400; i++) {
-          if ((await br(4)) & 0x1 == 0x1) break;
+          if ((await br(0x20)) & 0x1 == 0x1) break;
         }
 
         // Reference: inverse DCT -> residual -> predict + reconstruct.
@@ -1830,17 +1833,20 @@ void main() {
             return v;
           }
 
-          await bw(0, 0x1); // enable
-          await bw(0x42, 0x0); // SESS_SRC_ADDR (coefficients)
-          await bw(0x43, 0x40); // SESS_SRC_SIZE = reference patch addr (word 4)
-          await bw(0x44, 10 * 16); // SESS_DST_ADDR (word 10)
+          await bw(0x00, 0x1); // enable
+          await bw(0x110, 0x0); // SESS_SRC_ADDR (coefficients)
+          await bw(
+            0x118,
+            0x40,
+          ); // SESS_SRC_SIZE = reference patch addr (word 4)
+          await bw(0x120, 10 * 16); // SESS_DST_ADDR (word 10)
           // start | inverse | inter-enable | frac_x<<16 | frac_y<<20, 4x4 DCT
           await bw(
-            0x40,
+            0x100,
             0x1 | (1 << 1) | (1 << 6) | (mv.$1 << 16) | (mv.$2 << 20),
           );
           for (var i = 0; i < 400; i++) {
-            if ((await br(4)) & 0x1 == 0x1) break;
+            if ((await br(0x20)) & 0x1 == 0x1) break;
           }
 
           // Reference: inverse DCT residual, bilinear MC, then reconstruct.
@@ -2057,17 +2063,17 @@ void main() {
           return v;
         }
 
-        await bw(0, 0x1); // enable
-        await bw(0x42, 0x0); // SESS_SRC_ADDR (coefficients)
-        await bw(0x43, 0x40); // SESS_SRC_SIZE = reference patch addr (word 4)
-        await bw(0x44, 19 * 16); // SESS_DST_ADDR (word 19)
+        await bw(0x00, 0x1); // enable
+        await bw(0x110, 0x0); // SESS_SRC_ADDR (coefficients)
+        await bw(0x118, 0x40); // SESS_SRC_SIZE = reference patch addr (word 4)
+        await bw(0x120, 19 * 16); // SESS_DST_ADDR (word 19)
         // start | inverse | inter-enable | frac_x<<16 | frac_y<<20 | filt<<24
         await bw(
-          0x40,
+          0x100,
           0x1 | (1 << 1) | (1 << 6) | (fx << 16) | (fy << 20) | (filt << 24),
         );
         for (var i = 0; i < 400; i++) {
-          if ((await br(4)) & 0x1 == 0x1) break;
+          if ((await br(0x20)) & 0x1 == 0x1) break;
         }
 
         // Reference: inverse DCT residual, 8-tap separable MC, then reconstruct.
@@ -2245,15 +2251,15 @@ void main() {
           return v;
         }
 
-        await bw(0, 0x1); // enable
-        await bw(0x42, 0x0); // SESS_SRC_ADDR (block 0 coeffs)
-        await bw(0x44, 8 * 16); // SESS_DST_ADDR (word 8)
-        await bw(0x46, cols); // SESS_WIDTH = block columns
-        await bw(0x47, rows); // SESS_HEIGHT = block rows
+        await bw(0x00, 0x1); // enable
+        await bw(0x110, 0x0); // SESS_SRC_ADDR (block 0 coeffs)
+        await bw(0x120, 8 * 16); // SESS_DST_ADDR (memory word 8)
+        await bw(0x130, cols); // SESS_WIDTH = block columns
+        await bw(0x138, rows); // SESS_HEIGHT = block rows
         // start | inverse | predict-enable | tiled | Paeth mode (3<<13), 4x4 DCT
-        await bw(0x40, 0x1 | (1 << 1) | (1 << 5) | (1 << 7) | (3 << 13));
+        await bw(0x100, 0x1 | (1 << 1) | (1 << 5) | (1 << 7) | (3 << 13));
         for (var i = 0; i < 1200; i++) {
-          if ((await br(4)) & 0x1 == 0x1) break;
+          if ((await br(0x20)) & 0x1 == 0x1) break;
         }
 
         // Reference: model the line buffer + Paeth reconstruct over the raster.
@@ -2410,15 +2416,15 @@ void main() {
         return v;
       }
 
-      await bw(0, 0x1); // enable
-      await bw(0x42, 0x0); // SESS_SRC_ADDR (bitstream)
-      await bw(0x44, 8 * 16); // SESS_DST_ADDR (word 8)
-      await bw(0x46, cols); // SESS_WIDTH = block columns
-      await bw(0x47, rows); // SESS_HEIGHT = block rows
+      await bw(0x00, 0x1); // enable
+      await bw(0x110, 0x0); // SESS_SRC_ADDR (bitstream)
+      await bw(0x120, 8 * 16); // SESS_DST_ADDR (memory word 8)
+      await bw(0x130, cols); // SESS_WIDTH = block columns
+      await bw(0x138, rows); // SESS_HEIGHT = block rows
       // start | inverse | entropy-decode | predict | tiled, DC mode, 4x4 DCT
-      await bw(0x40, 0x1 | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 7));
+      await bw(0x100, 0x1 | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 7));
       for (var i = 0; i < 4000; i++) {
-        if ((await br(4)) & 0x1 == 0x1) break;
+        if ((await br(0x20)) & 0x1 == 0x1) break;
       }
 
       // Reference: decode all blocks from one stream (persistent CDFs), then
@@ -2580,15 +2586,15 @@ void main() {
           return v;
         }
 
-        await bw(0, 0x1); // enable
-        await bw(0x42, 0x0); // SESS_SRC_ADDR (bitstream)
-        await bw(0x44, 8 * 16); // SESS_DST_ADDR (word 8)
-        await bw(0x46, cols); // SESS_WIDTH = block columns
-        await bw(0x47, rows); // SESS_HEIGHT = block rows
+        await bw(0x00, 0x1); // enable
+        await bw(0x110, 0x0); // SESS_SRC_ADDR (bitstream)
+        await bw(0x120, 8 * 16); // SESS_DST_ADDR (memory word 8)
+        await bw(0x130, cols); // SESS_WIDTH = block columns
+        await bw(0x138, rows); // SESS_HEIGHT = block rows
         // start | inverse | entropy-decode | predict | tiled, DC mode, 4x4 DCT
-        await bw(0x40, 0x1 | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 7));
+        await bw(0x100, 0x1 | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 7));
         for (var i = 0; i < 4000; i++) {
-          if ((await br(4)) & 0x1 == 0x1) break;
+          if ((await br(0x20)) & 0x1 == 0x1) break;
         }
 
         // Reference: one persistent od_ec window + contexts across the grid.
@@ -2762,15 +2768,15 @@ void main() {
         return v;
       }
 
-      await bw(0, 0x1); // enable
-      await bw(0x42, 0x0); // SESS_SRC_ADDR (coeffs)
-      await bw(0x44, 8 * 16); // SESS_DST_ADDR (frame base, word 8)
-      await bw(0x46, cols); // SESS_WIDTH = block columns
-      await bw(0x47, rows); // SESS_HEIGHT = block rows
+      await bw(0x00, 0x1); // enable
+      await bw(0x110, 0x0); // SESS_SRC_ADDR (coeffs)
+      await bw(0x120, 8 * 16); // SESS_DST_ADDR (frame base, word 8)
+      await bw(0x130, cols); // SESS_WIDTH = block columns
+      await bw(0x138, rows); // SESS_HEIGHT = block rows
       // start | inverse | predict | tiled | 2D, DC mode, 4x4 DCT
-      await bw(0x40, 0x1 | (1 << 1) | (1 << 5) | (1 << 7) | (1 << 12));
+      await bw(0x100, 0x1 | (1 << 1) | (1 << 5) | (1 << 7) | (1 << 12));
       for (var i = 0; i < 1200; i++) {
-        if ((await br(4)) & 0x1 == 0x1) break;
+        if ((await br(0x20)) & 0x1 == 0x1) break;
       }
 
       // Reference: line buffer DC reconstruct, placed at raster (x,y).
@@ -2962,19 +2968,19 @@ void main() {
           return v;
         }
 
-        await bw(0, 0x1); // enable
-        await bw(0x42, 0x0); // SESS_SRC_ADDR (coeffs)
-        await bw(0x43, 6 * 16); // SESS_SRC_SIZE = patch base (word 6)
-        await bw(0x44, 24 * 16); // SESS_DST_ADDR (word 24)
-        await bw(0x46, cols); // SESS_WIDTH = block columns
-        await bw(0x47, rows); // SESS_HEIGHT = block rows
+        await bw(0x00, 0x1); // enable
+        await bw(0x110, 0x0); // SESS_SRC_ADDR (coeffs)
+        await bw(0x118, 6 * 16); // SESS_SRC_SIZE = patch base (word 6)
+        await bw(0x120, 24 * 16); // SESS_DST_ADDR (word 24)
+        await bw(0x130, cols); // SESS_WIDTH = block columns
+        await bw(0x138, rows); // SESS_HEIGHT = block rows
         // start | inverse | inter | tiled | frac_x<<16 | frac_y<<20, 4x4 DCT
         await bw(
-          0x40,
+          0x100,
           0x1 | (1 << 1) | (1 << 6) | (1 << 7) | (fx << 16) | (fy << 20),
         );
         for (var i = 0; i < 1200; i++) {
-          if ((await br(4)) & 0x1 == 0x1) break;
+          if ((await br(0x20)) & 0x1 == 0x1) break;
         }
 
         int s16(int v) {
@@ -3156,21 +3162,21 @@ void main() {
           return v;
         }
 
-        await bw(0, 0x1); // enable
-        await bw(0x42, 0x0); // SESS_SRC_ADDR (coeffs)
+        await bw(0x00, 0x1); // enable
+        await bw(0x110, 0x0); // SESS_SRC_ADDR (coeffs)
         await bw(
-          0x43,
+          0x118,
           8 * 16,
         ); // SESS_SRC_SIZE = ref base = buffer row 1 (word 8)
-        await bw(0x44, 28 * 16); // SESS_DST_ADDR (word 28)
-        await bw(0x45, 4 * 16); // SESS_DST_SIZE = motion field base (word 4)
-        await bw(0x48, refStride); // SESS_REF_STRIDE (samples/row)
-        await bw(0x46, cols); // SESS_WIDTH = block columns
-        await bw(0x47, rows); // SESS_HEIGHT = block rows
+        await bw(0x120, 28 * 16); // SESS_DST_ADDR (word 28)
+        await bw(0x128, 4 * 16); // SESS_DST_SIZE = motion field base (word 4)
+        await bw(0x140, refStride); // SESS_REF_STRIDE (samples/row)
+        await bw(0x130, cols); // SESS_WIDTH = block columns
+        await bw(0x138, rows); // SESS_HEIGHT = block rows
         // start | inverse | inter | tiled | real-gather, 4x4 DCT
-        await bw(0x40, 0x1 | (1 << 1) | (1 << 6) | (1 << 7) | (1 << 26));
+        await bw(0x100, 0x1 | (1 << 1) | (1 << 6) | (1 << 7) | (1 << 26));
         for (var i = 0; i < 1500; i++) {
-          if ((await br(4)) & 0x1 == 0x1) break;
+          if ((await br(0x20)) & 0x1 == 0x1) break;
         }
 
         int s16(int v) {
@@ -3344,18 +3350,18 @@ void main() {
         return v;
       }
 
-      await bw(0, 0x1); // enable
-      await bw(0x42, 0x0); // SESS_SRC_ADDR (coeffs)
-      await bw(0x44, 16 * 16); // SESS_DST_ADDR (frame base, word 16)
-      await bw(0x46, cols); // SESS_WIDTH = block columns
-      await bw(0x47, rows); // SESS_HEIGHT = block rows
+      await bw(0x00, 0x1); // enable
+      await bw(0x110, 0x0); // SESS_SRC_ADDR (coeffs)
+      await bw(0x120, 16 * 16); // SESS_DST_ADDR (frame base, word 16)
+      await bw(0x130, cols); // SESS_WIDTH = block columns
+      await bw(0x138, rows); // SESS_HEIGHT = block rows
       // start | inverse | size 8x8 | predict | tiled | 2D, DC mode
       await bw(
-        0x40,
+        0x100,
         0x1 | (1 << 1) | (1 << 2) | (1 << 5) | (1 << 7) | (1 << 12),
       );
       for (var i = 0; i < 2000; i++) {
-        if ((await br(4)) & 0x1 == 0x1) break;
+        if ((await br(0x20)) & 0x1 == 0x1) break;
       }
 
       int s16(int v) {

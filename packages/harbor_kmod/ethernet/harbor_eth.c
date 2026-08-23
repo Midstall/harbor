@@ -3,14 +3,15 @@
  * Harbor Ethernet MAC driver
  *
  * Registers:
- *   0x000: MAC_CTRL    0x004: MAC_STATUS    0x008: MAC_ADDR_LO
- *   0x00C: MAC_ADDR_HI 0x010: INT_STATUS    0x014: INT_ENABLE
- *   0x020: TX_CTRL     0x028: TX_DESC_BASE  0x030: RX_CTRL
- *   0x038: RX_DESC_BASE 0x040: MDIO_CTRL   0x044: MDIO_DATA
+ *   0x000: MAC_CTRL    0x008: MAC_STATUS    0x010: MAC_ADDR_LO
+ *   0x018: MAC_ADDR_HI 0x020: INT_STATUS    0x028: INT_ENABLE
+ *   0x040: TX_CTRL     0x050: TX_DESC_BASE  0x060: RX_CTRL
+ *   0x070: RX_DESC_BASE 0x080: MDIO_CTRL    0x088: MDIO_DATA
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/io.h>
@@ -20,17 +21,17 @@
 #include <linux/interrupt.h>
 
 #define HARBOR_ETH_MAC_CTRL	0x000
-#define HARBOR_ETH_MAC_STATUS	0x004
-#define HARBOR_ETH_MAC_ADDR_LO	0x008
-#define HARBOR_ETH_MAC_ADDR_HI	0x00C
-#define HARBOR_ETH_INT_STATUS	0x010
-#define HARBOR_ETH_INT_ENABLE	0x014
-#define HARBOR_ETH_TX_CTRL	0x020
-#define HARBOR_ETH_TX_DESC_BASE 0x028
-#define HARBOR_ETH_RX_CTRL	0x030
-#define HARBOR_ETH_RX_DESC_BASE 0x038
-#define HARBOR_ETH_MDIO_CTRL	0x040
-#define HARBOR_ETH_MDIO_DATA	0x044
+#define HARBOR_ETH_MAC_STATUS	0x008
+#define HARBOR_ETH_MAC_ADDR_LO	0x010
+#define HARBOR_ETH_MAC_ADDR_HI	0x018
+#define HARBOR_ETH_INT_STATUS	0x020
+#define HARBOR_ETH_INT_ENABLE	0x028
+#define HARBOR_ETH_TX_CTRL	0x040
+#define HARBOR_ETH_TX_DESC_BASE 0x050
+#define HARBOR_ETH_RX_CTRL	0x060
+#define HARBOR_ETH_RX_DESC_BASE 0x070
+#define HARBOR_ETH_MDIO_CTRL	0x080
+#define HARBOR_ETH_MDIO_DATA	0x088
 
 struct harbor_eth {
 	void __iomem *base;
@@ -105,7 +106,7 @@ static int harbor_eth_probe(struct platform_device *pdev)
 	ndev->netdev_ops = &harbor_eth_ops;
 	SET_NETDEV_DEV(ndev, &pdev->dev);
 
-	ret = of_get_ethdev_address(pdev->dev.of_node, ndev);
+	ret = device_get_ethdev_address(&pdev->dev, ndev);
 	if (ret)
 		eth_hw_addr_random(ndev);
 

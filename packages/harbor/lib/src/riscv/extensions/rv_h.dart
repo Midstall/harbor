@@ -215,17 +215,5 @@ const rvH = RiscVExtension(
         RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
       ],
     ),
-    RiscVOperation(
-      mnemonic: 'sfence.vma',
-      opcode: RiscvOpcode.system,
-      funct7: 0x09,
-      format: rType,
-      privilegeLevel: 1,
-      resources: [RfResource(_int, rs1), RfResource(_int, rs2)],
-      microcode: [
-        RiscVTlbFenceOp(),
-        RiscVUpdatePc(RiscVMicroOpField.pc, offset: 4),
-      ],
-    ),
   ],
 );

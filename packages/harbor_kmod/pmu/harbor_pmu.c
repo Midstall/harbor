@@ -2,29 +2,35 @@
 /*
  * Harbor Power Management Unit driver
  *
- * Global registers:
- *   0x00: CTRL         0x04: STATUS
- *   0x08: WAKEUP_EN    0x0C: WAKEUP_STATUS
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour.
  *
- * Per-domain (0x40 + domain*0x10):
- *   +0x00: DOM_CTRL    +0x04: DOM_STATUS   +0x08: DOM_ISO
+ * Global registers:
+ *   0x00: CTRL         0x08: STATUS
+ *   0x10: WAKEUP_EN    0x18: WAKEUP_STATUS
+ *
+ * Per-domain (0x40 + domain*0x20):
+ *   +0x00: DOM_CTRL    +0x08: DOM_STATUS   +0x10: DOM_ISO
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/pm_domain.h>
 #include <linux/io.h>
 #include <linux/of.h>
 
 #define HARBOR_PMU_CTRL		 0x00
-#define HARBOR_PMU_STATUS	 0x04
-#define HARBOR_PMU_WAKEUP_EN	 0x08
-#define HARBOR_PMU_WAKEUP_STATUS 0x0C
+#define HARBOR_PMU_STATUS	 0x08
+#define HARBOR_PMU_WAKEUP_EN	 0x10
+#define HARBOR_PMU_WAKEUP_STATUS 0x18
 #define HARBOR_PMU_DOM_BASE	 0x40
-#define HARBOR_PMU_DOM_STRIDE	 0x10
+#define HARBOR_PMU_DOM_STRIDE	 0x20
 #define HARBOR_PMU_DOM_CTRL	 0x00
-#define HARBOR_PMU_DOM_STATUS	 0x04
-#define HARBOR_PMU_DOM_ISO	 0x08
+#define HARBOR_PMU_DOM_STATUS	 0x08
+#define HARBOR_PMU_DOM_ISO	 0x10
 
 #define HARBOR_PMU_MAX_DOMAINS 8
 
@@ -83,7 +89,7 @@ static int harbor_pmu_probe(struct platform_device *pdev)
 	if (IS_ERR(pmu->base))
 		return PTR_ERR(pmu->base);
 
-	of_property_read_u32(pdev->dev.of_node, "num-domains", &num_domains);
+	device_property_read_u32(&pdev->dev, "num-domains", &num_domains);
 	if (num_domains > HARBOR_PMU_MAX_DOMAINS)
 		num_domains = HARBOR_PMU_MAX_DOMAINS;
 	pmu->num_domains = num_domains;
@@ -115,9 +121,21 @@ static int harbor_pmu_probe(struct platform_device *pdev)
 	pmu->pd_data.domains = pmu->pd_list;
 	pmu->pd_data.num_domains = num_domains;
 
-	ret = of_genpd_add_provider_onecell(pdev->dev.of_node, &pmu->pd_data);
-	if (ret)
-		goto err_remove;
+	/*
+	 * genpd providers are looked up by OF phandle and have no ACPI
+	 * counterpart, so under ACPI there is nothing for consumers to
+	 * reference. The domains themselves are still created and usable
+	 * through pm_genpd_*; only the phandle lookup table is skipped.
+	 */
+	if (pdev->dev.of_node) {
+		ret = of_genpd_add_provider_onecell(pdev->dev.of_node,
+						    &pmu->pd_data);
+		if (ret)
+			goto err_remove;
+	} else {
+		dev_info(&pdev->dev, "no OF node: power domains created "
+				     "without a provider table\n");
+	}
 
 	platform_set_drvdata(pdev, pmu);
 	return 0;
@@ -133,7 +151,8 @@ static void harbor_pmu_remove(struct platform_device *pdev)
 	struct harbor_pmu *pmu = platform_get_drvdata(pdev);
 	int i;
 
-	of_genpd_del_provider(pdev->dev.of_node);
+	if (pdev->dev.of_node)
+		of_genpd_del_provider(pdev->dev.of_node);
 	for (i = 0; i < pmu->num_domains; i++)
 		pm_genpd_remove(&pmu->domains[i].genpd);
 }

@@ -1,5 +1,8 @@
 import 'package:rohd/rohd.dart';
 
+import '../soc/target.dart';
+import 'tmds_serializer.dart';
+
 import '../peripherals/display.dart';
 import 'display_output.dart';
 import 'double_buffer_scanout.dart';
@@ -22,6 +25,10 @@ import 'video_timing.dart';
 class HarborFramebufferDisplay extends Module {
   /// Serialized TMDS lanes ({clk, red, green, blue} from MSB).
   Logic get gpdi => output('gpdi');
+
+  /// The four complement lanes, present only on a target that drives its own
+  /// ([TmdsSerializer.needsComplement]).
+  Logic get gpdiN => output('gpdi_n');
 
   /// Parallel video (for a VGA-style backend or observation).
   Logic get de => output('de');
@@ -60,6 +67,7 @@ class HarborFramebufferDisplay extends Module {
     required Logic mDataIn,
     required Logic mAck,
     this.outputType = HarborDisplayInterface.hdmi,
+    required HarborDeviceTarget target,
     super.name = 'framebuffer_display',
   }) : super(definitionName: 'HarborFramebufferDisplay') {
     // dvi/hdmi share the TMDS transmitter. Reject types without a backend.
@@ -77,6 +85,10 @@ class HarborFramebufferDisplay extends Module {
     final hbits = (timing.hTotal - 1).bitLength;
     final vbits = (timing.vTotal - 1).bitLength;
     addOutput('gpdi', width: 4);
+    final tmdsComplement = TmdsSerializer.needsComplement(target);
+    if (tmdsComplement) {
+      addOutput('gpdi_n', width: 4);
+    }
     addOutput('de');
     addOutput('hsync');
     addOutput('vsync');
@@ -149,6 +161,7 @@ class HarborFramebufferDisplay extends Module {
     vsync <= timingGen.vsync;
 
     final transmitter = DviTransmitter(
+      target: target,
       pixelClk: pixelClk,
       shiftClk: shiftClk,
       pixelReset: pixelReset,
@@ -161,5 +174,8 @@ class HarborFramebufferDisplay extends Module {
       blue: b,
     );
     gpdi <= transmitter.gpdi;
+    if (tmdsComplement) {
+      gpdiN <= transmitter.gpdiN;
+    }
   }
 }

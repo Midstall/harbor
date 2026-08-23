@@ -224,12 +224,22 @@ class HarborClockDomain {
   /// The encoding is target-specific (e.g., PLL divider values).
   final Logic? frequencySelect;
 
+  /// Top-level input port this domain is driven by under [HarborSimTarget],
+  /// or null when it has none.
+  ///
+  /// A simulation has no PLL, so a derived domain becomes its own input clock
+  /// for the harness to drive. A domain that already runs at the source rate
+  /// is the source clock, with NO port of its own; a harness that assumed one
+  /// would bind a port that does not exist.
+  final String? simPort;
+
   const HarborClockDomain({
     required this.config,
     required this.clk,
     required this.reset,
     this.locked,
     this.frequencySelect,
+    this.simPort,
   });
 
   /// The domain name.
@@ -405,7 +415,33 @@ class HarborClockGenerator {
         return _createFpgaPll(config, sourceFreq, t);
       case HarborAsicTarget():
         return _createAsicPll(config, sourceFreq);
+      case HarborSimTarget():
+        return _createSimClock(config);
     }
+  }
+
+  /// Verilator has no PLL to instantiate, so each derived domain becomes its
+  /// OWN top-level input port that the generated C++ clock wheel drives at
+  /// [HarborClockConfig.frequency].
+  ///
+  /// Passing the source clock through instead would be simpler, but it would
+  /// collapse every domain onto one clock and quietly turn all the
+  /// clock-crossing logic synchronous, which is precisely the logic a
+  /// simulator is worth having for. Separate ports keep the crossings real.
+  HarborClockDomain _createSimClock(HarborClockConfig config) {
+    final portName = '${config.name}_clk';
+    parent.createPort(portName, PortDirection.input);
+    final domClk = parent.input(portName);
+    final domain = HarborClockDomain(
+      config: config,
+      clk: domClk,
+      // No LOCKED to wait on: the harness supplies a running clock from the
+      // first tick, so the domain leaves reset off the shared input reset.
+      reset: _domainReset(domClk, inputReset, config.name),
+      simPort: portName,
+    );
+    _domains.add(domain);
+    return domain;
   }
 
   HarborClockDomain _createFpgaPll(

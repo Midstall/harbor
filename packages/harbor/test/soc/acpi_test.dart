@@ -160,7 +160,11 @@ void main() {
     });
 
     test('SRAM flows through the generator', () {
-      final sram = HarborSram(baseAddress: 0x80000000, size: 0x10000);
+      final sram = HarborSram(
+        baseAddress: 0x80000000,
+        size: 0x10000,
+        target: const HarborSimTarget(),
+      );
       final asl = HarborAcpiGenerator(
         oemId: 'MDSTLL',
         oemTableId: 'CREEKV1',

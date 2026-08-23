@@ -31,14 +31,16 @@ enum HarborResetSource {
 /// sequencing, and reset cause tracking. Supports per-domain
 /// reset control for isolating subsystems.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: CTRL       (bit 0: global reset, bit 4: reset cause clear)
-/// - 0x04: STATUS     (bits 4:0: reset cause, bit 8: reset active)
-/// - 0x08: HOLD_TIME  (reset hold cycles, default 256)
-/// - 0x0C: DOMAIN_RST (per-domain reset control, 1 bit per domain)
-/// - 0x10: DOMAIN_STATUS (per-domain reset status, read-only)
-/// - 0x14: WDOG_RST_EN (enable watchdog as reset source)
-/// - 0x18: SW_RST_KEY  (write 0xDEAD to trigger software reset)
+/// - 0x08: STATUS     (bits 4:0: reset cause, bit 8: reset active)
+/// - 0x10: HOLD_TIME  (reset hold cycles, default 256)
+/// - 0x18: DOMAIN_RST (per-domain reset control, 1 bit per domain)
+/// - 0x20: DOMAIN_STATUS (per-domain reset status, read-only)
+/// - 0x28: WDOG_RST_EN (enable watchdog as reset source)
+/// - 0x30: SW_RST_KEY  (write 0xDEAD to trigger software reset)
 class HarborResetController extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -173,8 +175,8 @@ class HarborResetController extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              Case(bus.addr.getRange(0, 5), [
-                CaseItem(Const(0x00, width: 5), [
+              Case(bus.addr.getRange(0, 6), [
+                CaseItem(Const(0x00, width: 6), [
                   If(
                     bus.we,
                     then: [
@@ -184,7 +186,7 @@ class HarborResetController extends BridgeModule
                     orElse: [bus.dataOut < Const(0, width: 32)],
                   ),
                 ]),
-                CaseItem(Const(0x04 >> 2, width: 5), [
+                CaseItem(Const(0x08, width: 6), [
                   bus.dataOut <
                       [
                         Const(0, width: 23),
@@ -192,28 +194,28 @@ class HarborResetController extends BridgeModule
                         cause,
                       ].swizzle().zeroExtend(32),
                 ]),
-                CaseItem(Const(0x08 >> 2, width: 5), [
+                CaseItem(Const(0x10, width: 6), [
                   If(
                     bus.we,
                     then: [holdTime < bus.dataIn.getRange(0, 16)],
                     orElse: [bus.dataOut < holdTime.zeroExtend(32)],
                   ),
                 ]),
-                CaseItem(Const(0x0C >> 2, width: 5), [
+                CaseItem(Const(0x18, width: 6), [
                   If(
                     bus.we,
                     then: [domainRstReg < bus.dataIn.getRange(0, domainCount)],
                     orElse: [bus.dataOut < domainRstReg.zeroExtend(32)],
                   ),
                 ]),
-                CaseItem(Const(0x14 >> 2, width: 5), [
+                CaseItem(Const(0x28, width: 6), [
                   If(
                     bus.we,
                     then: [wdogEn < bus.dataIn[0]],
                     orElse: [bus.dataOut < wdogEn.zeroExtend(32)],
                   ),
                 ]),
-                CaseItem(Const(0x18 >> 2, width: 5), [
+                CaseItem(Const(0x30, width: 6), [
                   If(
                     bus.we,
                     then: [

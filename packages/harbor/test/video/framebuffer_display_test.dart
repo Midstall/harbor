@@ -36,6 +36,7 @@ void main() {
     final mAck = Logic(name: 'm_ack');
 
     final disp = HarborFramebufferDisplay(
+      target: const HarborSimTarget(),
       timing: timing,
       pixelClk: clk,
       pixelReset: reset,

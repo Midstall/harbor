@@ -2,18 +2,32 @@
 /*
  * Harbor USB controller driver (gadget mode)
  *
- * Global registers:
- *   0x000: CTRL       0x004: STATUS     0x008: ADDR
- *   0x00C: INT_STATUS 0x010: INT_ENABLE 0x014: FRAME
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour.
  *
- * Per-endpoint (0x100 + ep*0x20):
- *   +0x00: EP_CTRL    +0x04: EP_STATUS  +0x08: EP_BUFSIZE
- *   +0x0C: EP_TXDATA  +0x10: EP_RXDATA  +0x14: EP_TXLEN
- *   +0x18: EP_RXLEN
+ * Global registers:
+ *   0x000: CTRL       0x008: STATUS     0x010: ADDR
+ *   0x018: INT_STATUS 0x020: INT_ENABLE 0x028: FRAME
+ *
+ * Endpoint registers live in the second 512-byte page (address bit 9). The
+ * hardware implements EP0 only, and its registers are NOT a uniform per-endpoint
+ * block: there is no stride to index. See lib/src/peripherals/usb.dart.
+ *   0x200: EP0_CTRL   0x218: EP0_TXDATA 0x228: EP0_TXLEN
+ *   0x280: EP0_RXLEN  0x288: EP0_RXDATA 0x290: EP0_STATUS
+ *   0x300: HOST_TOKEN 0x308: HOST_STATUS  (host/OTG builds)
+ *
+ * NOTE: the gadget code below still models HARBOR_USB_MAX_EP uniform endpoints
+ * with a stride. That model does not exist in the hardware, so only endpoint 0
+ * resolves to a real register. Driving a non-zero endpoint writes into the
+ * host-mode block. Multi-endpoint support needs the hardware to grow the
+ * per-endpoint block first.
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/usb/gadget.h>
 #include <linux/io.h>
 #include <linux/of.h>
@@ -26,15 +40,16 @@
 #define HARBOR_USB_INT_ENABLE 0x010
 #define HARBOR_USB_FRAME      0x014
 
-#define HARBOR_USB_EP_BASE    0x100
-#define HARBOR_USB_EP_STRIDE  0x20
-#define HARBOR_USB_EP_CTRL    0x00
-#define HARBOR_USB_EP_STATUS  0x04
-#define HARBOR_USB_EP_BUFSIZE 0x08
-#define HARBOR_USB_EP_TXDATA  0x0C
-#define HARBOR_USB_EP_RXDATA  0x10
-#define HARBOR_USB_EP_TXLEN   0x14
-#define HARBOR_USB_EP_RXLEN   0x18
+/* The endpoint page. Only endpoint 0 exists in hardware, so the stride is the
+ * page itself and indexing past 0 leaves the block. */
+#define HARBOR_USB_EP_BASE   0x200
+#define HARBOR_USB_EP_STRIDE 0x100
+#define HARBOR_USB_EP_CTRL   0x00
+#define HARBOR_USB_EP_TXDATA 0x18
+#define HARBOR_USB_EP_TXLEN  0x28
+#define HARBOR_USB_EP_RXLEN  0x80
+#define HARBOR_USB_EP_RXDATA 0x88
+#define HARBOR_USB_EP_STATUS 0x90
 
 #define HARBOR_USB_MAX_EP 16
 
@@ -181,7 +196,7 @@ static int harbor_usb_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	of_property_read_u32(pdev->dev.of_node, "num-endpoints", &num_ep);
+	device_property_read_u32(&pdev->dev, "num-endpoints", &num_ep);
 	if (num_ep > HARBOR_USB_MAX_EP)
 		num_ep = HARBOR_USB_MAX_EP;
 	husb->num_ep = num_ep;

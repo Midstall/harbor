@@ -3,9 +3,9 @@
  * Harbor temperature sensor driver (hwmon)
  *
  * Registers:
- *   0x00: CTRL       0x04: STATUS     0x08: TEMP_RAW
- *   0x0C: TEMP_C     0x10: ALARM_HI   0x14: ALARM_LO
- *   0x18: INT_STATUS 0x1C: INT_ENABLE
+ *   0x00: CTRL       0x08: STATUS     0x10: TEMP_RAW
+ *   0x18: TEMP_C     0x20: ALARM_HI   0x28: ALARM_LO
+ *   0x30: INT_STATUS 0x38: INT_ENABLE
  *
  * TEMP_C is in millidegrees Celsius (signed 32-bit).
  */
@@ -17,13 +17,13 @@
 #include <linux/of.h>
 
 #define HARBOR_TEMP_CTRL       0x00
-#define HARBOR_TEMP_STATUS     0x04
-#define HARBOR_TEMP_RAW	       0x08
-#define HARBOR_TEMP_C	       0x0C
-#define HARBOR_TEMP_ALARM_HI   0x10
-#define HARBOR_TEMP_ALARM_LO   0x14
-#define HARBOR_TEMP_INT_STATUS 0x18
-#define HARBOR_TEMP_INT_ENABLE 0x1C
+#define HARBOR_TEMP_STATUS     0x08
+#define HARBOR_TEMP_RAW	       0x10
+#define HARBOR_TEMP_C	       0x18
+#define HARBOR_TEMP_ALARM_HI   0x20
+#define HARBOR_TEMP_ALARM_LO   0x28
+#define HARBOR_TEMP_INT_STATUS 0x30
+#define HARBOR_TEMP_INT_ENABLE 0x38
 
 #define HARBOR_TEMP_CTRL_EN   BIT(0)
 #define HARBOR_TEMP_CTRL_CONT BIT(1)

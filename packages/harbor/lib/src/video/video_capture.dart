@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:rohd/rohd.dart';
 
+import '../soc/target.dart';
+
 import '../peripherals/display.dart';
 import 'framebuffer_display.dart';
 
@@ -49,6 +51,8 @@ class _CaptureTop extends Module {
     final mDataIn = Logic(name: 'm_dat_i', width: 32);
     final mAck = Logic(name: 'm_ack');
     final disp = HarborFramebufferDisplay(
+      // A capture helper only ever runs in a simulation.
+      target: const HarborSimTarget(),
       timing: timing,
       pixelClk: clk,
       pixelReset: reset,

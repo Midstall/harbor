@@ -1,5 +1,7 @@
 import 'package:rohd/rohd.dart';
 
+import '../soc/target.dart';
+
 import 'tmds_encoder.dart';
 import 'tmds_serializer.dart';
 
@@ -19,6 +21,10 @@ class DviTransmitter extends Module {
   /// Four serialized TMDS lanes: bit3 clock, bit2 red, bit1 green, bit0 blue.
   Logic get gpdi => output('gpdi');
 
+  /// The four complement lanes, in the same order as [gpdi]. Present only on a
+  /// target that drives its own complements ([TmdsSerializer.needsComplement]).
+  Logic get gpdiN => output('gpdi_n');
+
   DviTransmitter({
     required Logic pixelClk,
     required Logic shiftClk,
@@ -30,6 +36,7 @@ class DviTransmitter extends Module {
     required Logic red,
     required Logic green,
     required Logic blue,
+    required HarborDeviceTarget target,
     super.name = 'dvi_transmitter',
   }) : super(definitionName: 'DviTransmitter') {
     pixelClk = addInput('pixel_clk', pixelClk);
@@ -43,6 +50,10 @@ class DviTransmitter extends Module {
     green = addInput('green', green, width: 8);
     blue = addInput('blue', blue, width: 8);
     addOutput('gpdi', width: 4);
+    final complement = TmdsSerializer.needsComplement(target);
+    if (complement) {
+      addOutput('gpdi_n', width: 4);
+    }
 
     Logic encode(Logic data, Logic ctrl) => TmdsEncoder(
       clk: pixelClk,
@@ -58,8 +69,12 @@ class DviTransmitter extends Module {
     final sym1 = encode(green, Const(0, width: 2));
     final sym2 = encode(red, Const(0, width: 2));
 
-    Logic serialize(Logic symbol) =>
-        TmdsSerializer(shiftClk: shiftClk, reset: shiftReset, symbol: symbol).q;
+    TmdsSerializer serialize(Logic symbol) => TmdsSerializer(
+      shiftClk: shiftClk,
+      reset: shiftReset,
+      symbol: symbol,
+      target: target,
+    );
 
     final ch0 = serialize(sym0);
     final ch1 = serialize(sym1);
@@ -67,6 +82,9 @@ class DviTransmitter extends Module {
     // TMDS clock channel: a fixed 0b1111100000 pattern is the pixel clock.
     final chClk = serialize(Const(0x3E0, width: 10));
 
-    gpdi <= [chClk, ch2, ch1, ch0].swizzle();
+    gpdi <= [chClk.q, ch2.q, ch1.q, ch0.q].swizzle();
+    if (complement) {
+      gpdiN <= [chClk.qn, ch2.qn, ch1.qn, ch0.qn].swizzle();
+    }
   }
 }

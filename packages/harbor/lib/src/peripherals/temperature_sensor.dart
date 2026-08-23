@@ -41,15 +41,17 @@ enum HarborTemperatureSource {
 /// If no target is given, the sensor exposes raw `temp_raw_in` / `temp_valid_in`
 /// ports for manual wiring.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: CTRL      (bit 0: enable, bit 1: continuous mode)
-/// - 0x04: STATUS    (bit 0: data valid, bit 1: over-temperature)
-/// - 0x08: TEMP_RAW  (read-only, raw sensor value, 12 bits)
-/// - 0x0C: TEMP_C    (read-only, temperature in millidegrees C, signed 32-bit)
-/// - 0x10: ALARM_HI  (read/write, high temperature alarm threshold, millidegrees C)
-/// - 0x14: ALARM_LO  (read/write, low temperature alarm threshold, millidegrees C)
-/// - 0x18: INT_STATUS (read/write-1-to-clear)
-/// - 0x1C: INT_ENABLE (read/write, interrupt enable mask)
+/// - 0x08: STATUS    (bit 0: data valid, bit 1: over-temperature)
+/// - 0x10: TEMP_RAW  (read-only, raw sensor value, 12 bits)
+/// - 0x18: TEMP_C    (read-only, temperature in millidegrees C, signed 32-bit)
+/// - 0x20: ALARM_HI  (read/write, high temperature alarm threshold, millidegrees C)
+/// - 0x28: ALARM_LO  (read/write, low temperature alarm threshold, millidegrees C)
+/// - 0x30: INT_STATUS (read/write-1-to-clear)
+/// - 0x38: INT_ENABLE (read/write, interrupt enable mask)
 class HarborTemperatureSensor extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -96,6 +98,9 @@ class HarborTemperatureSensor extends BridgeModule
       HarborFpgaTarget(vendor: HarborFpgaVendor.ice40) => throw ArgumentError(
         'iCE40 has no on-die temperature sensor',
       ),
+      // Verilator has no die and no vendor sensor primitive. Expose the raw
+      // input ports so the harness can drive whatever reading a test wants.
+      HarborSimTarget() => HarborTemperatureSource.external_,
       HarborAsicTarget(provider: final pdk) when pdk.hasTemperatureSensor =>
         HarborTemperatureSource.bandgap,
       HarborAsicTarget() => throw ArgumentError(
@@ -262,44 +267,44 @@ class HarborTemperatureSensor extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              Case(bus.addr.getRange(0, 5), [
+              Case(bus.addr.getRange(0, 6), [
                 // 0x00: CTRL
-                CaseItem(Const(0x00, width: 5), [
+                CaseItem(Const(0x00, width: 6), [
                   If(
                     bus.we,
                     then: [ctrl < bus.dataIn.getRange(0, 2)],
                     orElse: [bus.dataOut < ctrl.zeroExtend(32)],
                   ),
                 ]),
-                // 0x04: STATUS
-                CaseItem(Const(0x04 >> 2, width: 5), [
+                // 0x08: STATUS
+                CaseItem(Const(0x08, width: 6), [
                   bus.dataOut <
                       [Const(0, width: 30), overTemp, dataValid].swizzle(),
                 ]),
-                // 0x08: TEMP_RAW
-                CaseItem(Const(0x08 >> 2, width: 5), [
+                // 0x10: TEMP_RAW
+                CaseItem(Const(0x10, width: 6), [
                   bus.dataOut < tempRaw.zeroExtend(32),
                 ]),
-                // 0x0C: TEMP_C
-                CaseItem(Const(0x0C >> 2, width: 5), [bus.dataOut < tempC]),
-                // 0x10: ALARM_HI
-                CaseItem(Const(0x10 >> 2, width: 5), [
+                // 0x18: TEMP_C
+                CaseItem(Const(0x18, width: 6), [bus.dataOut < tempC]),
+                // 0x20: ALARM_HI
+                CaseItem(Const(0x20, width: 6), [
                   If(
                     bus.we,
                     then: [alarmHi < bus.dataIn],
                     orElse: [bus.dataOut < alarmHi],
                   ),
                 ]),
-                // 0x14: ALARM_LO
-                CaseItem(Const(0x14 >> 2, width: 5), [
+                // 0x28: ALARM_LO
+                CaseItem(Const(0x28, width: 6), [
                   If(
                     bus.we,
                     then: [alarmLo < bus.dataIn],
                     orElse: [bus.dataOut < alarmLo],
                   ),
                 ]),
-                // 0x18: INT_STATUS (write-1-to-clear)
-                CaseItem(Const(0x18 >> 2, width: 5), [
+                // 0x30: INT_STATUS (write-1-to-clear)
+                CaseItem(Const(0x30, width: 6), [
                   If(
                     bus.we,
                     then: [
@@ -308,8 +313,8 @@ class HarborTemperatureSensor extends BridgeModule
                     orElse: [bus.dataOut < intStatus.zeroExtend(32)],
                   ),
                 ]),
-                // 0x1C: INT_ENABLE
-                CaseItem(Const(0x1C >> 2, width: 5), [
+                // 0x38: INT_ENABLE
+                CaseItem(Const(0x38, width: 6), [
                   If(
                     bus.we,
                     then: [intEnable < bus.dataIn.getRange(0, 3)],

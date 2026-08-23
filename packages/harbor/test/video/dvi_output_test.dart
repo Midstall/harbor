@@ -13,6 +13,7 @@ void main() {
     final pixelReset = Logic(name: 'pixel_reset');
     final shiftReset = Logic(name: 'shift_reset');
     final dvi = DviOutput(
+      target: const HarborSimTarget(),
       timing: const HarborDisplayTiming.vga640x480(),
       pixelClk: pixelClk,
       shiftClk: shiftClk,

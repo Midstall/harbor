@@ -9,22 +9,39 @@ import '../soc/svd.dart';
 
 /// I2C master/slave controller.
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x00: CTRL     (enable, interrupt enable, master/slave)
-/// - 0x04: STATUS   (busy, ack_received, arb_lost, tx_empty, rx_ready)
-/// - 0x08: DATA     (write=TX byte, read=RX byte)
-/// - 0x0C: ADDR     (slave address for master mode, own address for slave)
-/// - 0x10: PRESCALE (clock prescaler for SCL frequency)
-/// - 0x14: CMD      (write: start, stop, read, write, ack/nack)
+/// - 0x08: STATUS   (busy, ack_received, arb_lost, tx_empty, rx_ready)
+/// - 0x10: DATA     (write=TX byte, read=RX byte)
+/// - 0x18: ADDR     (slave address for master mode, own address for slave)
+/// - 0x20: PRESCALE (clock prescaler for SCL frequency)
+/// - 0x28: CMD      (write: start, stop, read, write, ack/nack)
 ///
 /// Supports standard (100 kHz), fast (400 kHz), and fast-plus (1 MHz).
 class HarborI2cController extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
         HarborAcpiDeviceProvider,
-        HarborSvdPeripheralProvider {
+        HarborSvdPeripheralProvider,
+        HarborInputClockConsumer {
   /// Base address in the SoC memory map.
   final int baseAddress;
+
+  /// Controller input clock in Hz (the system clock the PRESCALE register
+  /// divides). Emitted as `harbor,input-clock-hz`, NOT `clock-frequency`: on an
+  /// I2C node the standard binding gives `clock-frequency` the SCL bus rate, so
+  /// overloading it would make a driver clock the bus at the system rate.
+  /// 0 leaves the property out.
+  int clockFrequency;
+
+  /// Wishbone slave address width. Defaults to 8 (256-byte register window).
+  final int busAddressWidth;
+
+  /// Wishbone slave data width. Must match the SoC fabric (e.g. 64 on an RV64
+  /// SoC). The register file itself is 32-bit; wider buses zero-extend reads.
+  final int busDataWidth;
 
   /// Bus slave port.
   late final BusSlavePort bus;
@@ -34,6 +51,9 @@ class HarborI2cController extends BridgeModule
 
   HarborI2cController({
     required this.baseAddress,
+    this.clockFrequency = 0,
+    this.busAddressWidth = 8,
+    this.busDataWidth = 32,
     BusProtocol protocol = BusProtocol.wishbone,
     String? name,
   }) : super('HarborI2cController', name: name ?? 'i2c') {
@@ -49,12 +69,16 @@ class HarborI2cController extends BridgeModule
     addOutput('sda_oe');
     addOutput('interrupt');
 
+    // Bus read-data width. The register file is 32-bit; a wider fabric sees the
+    // registers zero-extended into the low word.
+    final dw = busDataWidth;
+
     bus = BusSlavePort.create(
       module: this,
       name: 'bus',
       protocol: protocol,
-      addressWidth: 8,
-      dataWidth: 32,
+      addressWidth: busAddressWidth,
+      dataWidth: dw,
     );
 
     final clk = input('clk');
@@ -101,11 +125,11 @@ class HarborI2cController extends BridgeModule
     interrupt <= irqEn & cmdDone;
 
     final status =
-        busy.zeroExtend(32) |
-        (ackReceived.zeroExtend(32) << Const(1, width: 32)) |
-        (arbLost.zeroExtend(32) << Const(2, width: 32)) |
-        (rxReady.zeroExtend(32) << Const(4, width: 32)) |
-        (cmdDone.zeroExtend(32) << Const(5, width: 32));
+        busy.zeroExtend(dw) |
+        (ackReceived.zeroExtend(dw) << Const(1, width: dw)) |
+        (arbLost.zeroExtend(dw) << Const(2, width: dw)) |
+        (rxReady.zeroExtend(dw) << Const(4, width: dw)) |
+        (cmdDone.zeroExtend(dw) << Const(5, width: dw));
 
     Sequential(clk, [
       If(
@@ -128,11 +152,11 @@ class HarborI2cController extends BridgeModule
           i2cState < Const(stIdle, width: 4),
           sclPhase < Const(0),
           bus.ack < Const(0),
-          bus.dataOut < Const(0, width: 32),
+          bus.dataOut < Const(0, width: dw),
         ],
         orElse: [
           bus.ack < Const(0),
-          bus.dataOut < Const(0, width: 32),
+          bus.dataOut < Const(0, width: dw),
 
           // I2C clock divider
           If(
@@ -152,53 +176,55 @@ class HarborI2cController extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              Case(bus.addr.getRange(0, 5), [
+              // Byte-address decode: registers sit 8 bytes apart (see the map
+              // above), so match the low 6 bits of the byte address directly.
+              Case(bus.addr.getRange(0, 6), [
                 // 0x00: CTRL
-                CaseItem(Const(0x00, width: 5), [
+                CaseItem(Const(0x00, width: 6), [
                   If(
                     bus.we,
                     then: [enable < bus.dataIn[0], irqEn < bus.dataIn[1]],
                     orElse: [
                       bus.dataOut <
-                          enable.zeroExtend(32) |
-                              (irqEn.zeroExtend(32) << Const(1, width: 32)),
+                          enable.zeroExtend(dw) |
+                              (irqEn.zeroExtend(dw) << Const(1, width: dw)),
                     ],
                   ),
                 ]),
-                // 0x04: STATUS
-                CaseItem(Const(0x01, width: 5), [
+                // 0x08: STATUS
+                CaseItem(Const(0x08, width: 6), [
                   bus.dataOut < status,
                   If(bus.we, then: [cmdDone < Const(0)]), // clear on write
                 ]),
-                // 0x08: DATA
-                CaseItem(Const(0x02, width: 5), [
+                // 0x10: DATA
+                CaseItem(Const(0x10, width: 6), [
                   If(
                     bus.we,
                     then: [txData < bus.dataIn.getRange(0, 8)],
                     orElse: [
-                      bus.dataOut < rxData.zeroExtend(32),
+                      bus.dataOut < rxData.zeroExtend(dw),
                       rxReady < Const(0),
                     ],
                   ),
                 ]),
-                // 0x0C: ADDR
-                CaseItem(Const(0x03, width: 5), [
+                // 0x18: ADDR
+                CaseItem(Const(0x18, width: 6), [
                   If(
                     bus.we,
                     then: [slaveAddr < bus.dataIn.getRange(0, 7)],
-                    orElse: [bus.dataOut < slaveAddr.zeroExtend(32)],
+                    orElse: [bus.dataOut < slaveAddr.zeroExtend(dw)],
                   ),
                 ]),
-                // 0x10: PRESCALE
-                CaseItem(Const(0x04, width: 5), [
+                // 0x20: PRESCALE
+                CaseItem(Const(0x20, width: 6), [
                   If(
                     bus.we,
                     then: [prescale < bus.dataIn.getRange(0, 16)],
-                    orElse: [bus.dataOut < prescale.zeroExtend(32)],
+                    orElse: [bus.dataOut < prescale.zeroExtend(dw)],
                   ),
                 ]),
-                // 0x14: CMD (write-only: trigger I2C operations)
-                CaseItem(Const(0x05, width: 5), [
+                // 0x28: CMD (write-only: trigger I2C operations)
+                CaseItem(Const(0x28, width: 6), [
                   If(
                     bus.we,
                     then: [
@@ -249,10 +275,22 @@ class HarborI2cController extends BridgeModule
   }
 
   @override
+  int get inputClockHz => clockFrequency;
+
+  @override
+  void provideInputClockHz(int hz) {
+    if (clockFrequency == 0) clockFrequency = hz;
+  }
+
+  @override
   HarborDeviceTreeNode get dtNode => HarborDeviceTreeNode(
     compatible: ['harbor,i2c', 'opencores,i2c-ocores'],
     reg: BusAddressRange(baseAddress, 0x1000),
-    properties: {'#address-cells': 1, '#size-cells': 0},
+    properties: {
+      '#address-cells': 1,
+      '#size-cells': 0,
+      if (clockFrequency > 0) 'harbor,input-clock-hz': clockFrequency,
+    },
   );
 
   @override
@@ -264,6 +302,7 @@ class HarborI2cController extends BridgeModule
       'compatible': ['harbor,i2c', 'opencores,i2c-ocores'],
       '#address-cells': 1,
       '#size-cells': 0,
+      if (clockFrequency > 0) 'harbor,input-clock-hz': clockFrequency,
     },
   );
 

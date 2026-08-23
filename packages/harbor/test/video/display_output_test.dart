@@ -37,6 +37,7 @@ void main() {
     Logic l([int w = 1]) => Logic(width: w);
     expect(
       () => HarborFramebufferDisplay(
+        target: const HarborSimTarget(),
         timing: const HarborDisplayTiming.vga640x480(),
         pixelClk: l(),
         pixelReset: l(),

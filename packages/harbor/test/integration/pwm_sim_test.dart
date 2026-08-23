@@ -15,9 +15,9 @@ void main() {
       final tb = PeripheralTestBench(pwm);
       await tb.init();
 
-      // GLOBAL_CTRL word addr 0, bit 0 = global enable
-      await tb.write(0, 0x01);
-      final val = await tb.read(0);
+      // GLOBAL_CTRL byte offset 0x00, bit 0 = global enable
+      await tb.write(0x00, 0x01);
+      final val = await tb.read(0x00);
       expect(val & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -28,8 +28,8 @@ void main() {
       final tb = PeripheralTestBench(pwm);
       await tb.init();
 
-      // INT_STATUS word addr 1
-      final val = await tb.read(1);
+      // INT_STATUS byte offset 0x08
+      final val = await tb.read(0x08);
       // After reset, no interrupts pending
       expect(val, equals(0));
 

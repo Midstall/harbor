@@ -3,10 +3,10 @@
  * Harbor Display controller driver (DRM/KMS)
  *
  * Registers:
- *   0x00: CTRL       0x04: STATUS     0x08: FB_BASE
- *   0x0C: FB_STRIDE  0x10: H_ACTIVE   0x14: H_TIMING
- *   0x18: V_ACTIVE   0x1C: V_TIMING   0x20: INT_STATUS
- *   0x24: INT_ENABLE
+ *   0x00: CTRL       0x08: STATUS     0x10: FB_BASE
+ *   0x18: FB_STRIDE  0x20: H_ACTIVE   0x28: H_TIMING
+ *   0x30: V_ACTIVE   0x38: V_TIMING   0x40: INT_STATUS
+ *   0x48: INT_ENABLE
  */
 
 #include <linux/module.h>
@@ -29,15 +29,15 @@
 #include <drm/drm_vblank.h>
 
 #define HARBOR_DISP_CTRL       0x00
-#define HARBOR_DISP_STATUS     0x04
-#define HARBOR_DISP_FB_BASE    0x08
-#define HARBOR_DISP_FB_STRIDE  0x0C
-#define HARBOR_DISP_H_ACTIVE   0x10
-#define HARBOR_DISP_H_TIMING   0x14
-#define HARBOR_DISP_V_ACTIVE   0x18
-#define HARBOR_DISP_V_TIMING   0x1C
-#define HARBOR_DISP_INT_STATUS 0x20
-#define HARBOR_DISP_INT_ENABLE 0x24
+#define HARBOR_DISP_STATUS     0x08
+#define HARBOR_DISP_FB_BASE    0x10
+#define HARBOR_DISP_FB_STRIDE  0x18
+#define HARBOR_DISP_H_ACTIVE   0x20
+#define HARBOR_DISP_H_TIMING   0x28
+#define HARBOR_DISP_V_ACTIVE   0x30
+#define HARBOR_DISP_V_TIMING   0x38
+#define HARBOR_DISP_INT_STATUS 0x40
+#define HARBOR_DISP_INT_ENABLE 0x48
 
 struct harbor_display {
 	void __iomem *base;

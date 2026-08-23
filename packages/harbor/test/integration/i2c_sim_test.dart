@@ -18,9 +18,9 @@ void main() {
       final tb = PeripheralTestBench(i2c);
       await tb.init();
 
-      // PRESCALE word addr 4
-      await tb.write(4, 200);
-      final val = await tb.read(4);
+      // PRESCALE byte offset 0x20
+      await tb.write(0x20, 200);
+      final val = await tb.read(0x20);
       expect(val, equals(200));
 
       await Simulator.endSimulation();
@@ -34,9 +34,9 @@ void main() {
       final tb = PeripheralTestBench(i2c);
       await tb.init();
 
-      // CTRL word addr 0: bit 0 = enable
-      await tb.write(0, 0x01);
-      final val = await tb.read(0);
+      // CTRL byte offset 0x00: bit 0 = enable
+      await tb.write(0x00, 0x01);
+      final val = await tb.read(0x00);
       expect(val & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -50,8 +50,8 @@ void main() {
       final tb = PeripheralTestBench(i2c);
       await tb.init();
 
-      // STATUS word addr 1 (0x04 >> 2)
-      final val = await tb.read(1);
+      // STATUS byte offset 0x08
+      final val = await tb.read(0x08);
       // After reset: busy=0, ack=0, arb_lost=0, rx_ready=0
       expect(val & 0x01, equals(0));
 
@@ -66,9 +66,9 @@ void main() {
       final tb = PeripheralTestBench(i2c);
       await tb.init();
 
-      // ADDR word addr 3 (0x0C >> 2)
-      await tb.write(3, 0x50);
-      final val = await tb.read(3);
+      // ADDR byte offset 0x18
+      await tb.write(0x18, 0x50);
+      final val = await tb.read(0x18);
       expect(val & 0x7F, equals(0x50));
 
       await Simulator.endSimulation();

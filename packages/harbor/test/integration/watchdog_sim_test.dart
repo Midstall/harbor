@@ -15,9 +15,9 @@ void main() {
       final tb = PeripheralTestBench(wdt);
       await tb.init();
 
-      // TIMEOUT is word addr 2
-      await tb.write(2, 5000);
-      final val = await tb.read(2);
+      // TIMEOUT is byte offset 0x10
+      await tb.write(0x10, 5000);
+      final val = await tb.read(0x10);
       expect(val, equals(5000));
 
       await Simulator.endSimulation();
@@ -28,9 +28,9 @@ void main() {
       final tb = PeripheralTestBench(wdt);
       await tb.init();
 
-      // CTRL word addr 0: bit 0=enable, bit 1=reset_en
-      await tb.write(0, 0x03);
-      final val = await tb.read(0);
+      // CTRL byte offset 0x00: bit 0=enable, bit 1=reset_en
+      await tb.write(0x00, 0x03);
+      final val = await tb.read(0x00);
       expect(val & 0x03, equals(0x03));
 
       await Simulator.endSimulation();
@@ -42,15 +42,15 @@ void main() {
       await tb.init();
 
       // Set a large timeout so it doesn't expire
-      await tb.write(2, 99999);
+      await tb.write(0x10, 99999);
       // Enable
-      await tb.write(0, 0x01);
+      await tb.write(0x00, 0x01);
 
       await tb.waitCycles(5);
-      final count1 = await tb.read(5); // COUNT word addr 5
+      final count1 = await tb.read(0x28); // COUNT byte offset 0x28
 
       await tb.waitCycles(10);
-      final count2 = await tb.read(5);
+      final count2 = await tb.read(0x28);
 
       expect(count2, greaterThan(count1));
 
@@ -62,18 +62,18 @@ void main() {
       final tb = PeripheralTestBench(wdt);
       await tb.init();
 
-      await tb.write(2, 99999);
-      await tb.write(0, 0x01); // enable
+      await tb.write(0x10, 99999);
+      await tb.write(0x00, 0x01); // enable
 
       await tb.waitCycles(20);
-      final countBefore = await tb.read(5);
+      final countBefore = await tb.read(0x28);
       expect(countBefore, greaterThan(0));
 
-      // KICK word addr 4, magic value
-      await tb.write(4, 0x4B494B);
+      // KICK byte offset 0x20, magic value
+      await tb.write(0x20, 0x4B494B);
       await tb.waitCycles(2);
 
-      final countAfter = await tb.read(5);
+      final countAfter = await tb.read(0x28);
       expect(countAfter, lessThan(countBefore));
 
       await Simulator.endSimulation();
@@ -84,17 +84,17 @@ void main() {
       final tb = PeripheralTestBench(wdt);
       await tb.init();
 
-      await tb.write(2, 99999);
-      await tb.write(0, 0x01); // enable
+      await tb.write(0x10, 99999);
+      await tb.write(0x00, 0x01); // enable
       await tb.waitCycles(10);
 
       // Disable
-      await tb.write(0, 0x00);
+      await tb.write(0x00, 0x00);
       await tb.waitCycles(2);
 
-      final count1 = await tb.read(5);
+      final count1 = await tb.read(0x28);
       await tb.waitCycles(5);
-      final count2 = await tb.read(5);
+      final count2 = await tb.read(0x28);
 
       expect(count2, equals(count1));
 
@@ -106,8 +106,8 @@ void main() {
       final tb = PeripheralTestBench(wdt);
       await tb.init();
 
-      await tb.write(2, 99999);
-      final val = await tb.read(2);
+      await tb.write(0x10, 99999);
+      final val = await tb.read(0x10);
       expect(val, equals(99999));
 
       await Simulator.endSimulation();

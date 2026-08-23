@@ -6,6 +6,7 @@ import 'package:rohd_bridge/rohd_bridge.dart';
 import '../bus/bus.dart';
 import '../bus/wishbone/wishbone_arbiter.dart';
 import '../bus/wishbone/wishbone_decoder.dart';
+import '../bus/wishbone/wishbone_register_stage.dart';
 import '../bus/wishbone/wishbone_interface.dart';
 import '../blackbox/xilinx/xilinx.dart';
 import '../clock/clock_domain.dart';
@@ -17,6 +18,27 @@ import 'device_tree.dart';
 import 'graph.dart';
 import 'svd.dart';
 import 'target.dart';
+
+/// Selects how a slave that more than one fabric channel reaches is shared.
+///
+/// A channel is one arbiter plus decoder over its own slave subset. When two
+/// channels both reach one slave (for example a DMA channel and the CPU channel
+/// that meet only at memory), that slave has more than one channel decoder that
+/// wants to drive it. The convergence mode says how to merge those drivers.
+enum HarborMemConverge {
+  /// Merge the channels with a [WishboneArbiter] at the shared slave. The
+  /// arbiter grants one channel at a time, so the slave sees one master. This
+  /// is the only mode that is built today.
+  arbiter,
+
+  /// Give the shared slave two independent ports (for a true dual-port memory).
+  /// Not built yet.
+  dualport,
+
+  /// Let the channels keep separate decoders but share one decode map. Not
+  /// built yet.
+  sharedDecode,
+}
 
 /// A composable SoC built on rohd_bridge.
 ///
@@ -87,17 +109,31 @@ class HarborSoC extends BridgeModule {
   void _wireOnce(BridgeModule module, String? clockDomainName) {
     if (!_wired.add(module)) return;
     addSubModule(module);
-    final (
-      clk,
-      reset,
-    ) = clockDomainName != null && _clockDomains.containsKey(clockDomainName)
-        ? (
-            _clockDomains[clockDomainName]!.clk,
-            _clockDomains[clockDomainName]!.reset,
-          )
-        : defaultClock;
+    final domain = domainFor(clockDomainName);
+    final (clk, reset) = domain != null
+        ? (domain.clk, domain.reset)
+        : (input('clk'), input('reset'));
     module.input('clk').srcConnection! <= clk;
     module.input('reset').srcConnection! <= reset;
+  }
+
+  /// The clock domain a peripheral registered under [clockDomainName] actually
+  /// runs on, or null when it rides the raw `clk` input because no domains are
+  /// configured.
+  ///
+  /// [_wireOnce] and every rate this SoC reports go through here, so what a
+  /// device tree claims about a peripheral's clock cannot drift from what the
+  /// hardware is wired to.
+  HarborClockDomain? domainFor(String? clockDomainName) {
+    if (clockDomainName != null && _clockDomains.containsKey(clockDomainName)) {
+      return _clockDomains[clockDomainName];
+    }
+    if (_clockDomains.isEmpty) return null;
+    // Mirrors [defaultClock]: the conventional 'sys' bus domain, else the first
+    // registered one. NOT "the primary domain": on a SoC where sys is a CLKOS
+    // secondary those are different clocks, and picking the wrong one emits a
+    // plausible but wrong rate.
+    return _clockDomains['sys'] ?? _clockDomains.values.first;
   }
 
   late final HarborClockGenerator _clockGen;
@@ -109,6 +145,10 @@ class HarborSoC extends BridgeModule {
   /// its spare `coreClk` drives any [HarborClockConfig.providedByDdr3Tree] domain
   /// (so the core runs off the SAME MMCM as the DDR clocks: one MMCM on the pin).
   late final XilinxDdr3Clocks? xilinxDdr3Clocks;
+
+  /// Realised core-clock MHz of the dedicated Xilinx core PLL, kept so the
+  /// nextpnr `--pre-pack` addClock over-constraint can be emitted at build time.
+  double? _xilinxCoreClkMhz;
 
   final String acpiOemId;
   final String acpiOemTableId;
@@ -125,6 +165,13 @@ class HarborSoC extends BridgeModule {
   /// default first real source is 1.
   final int interruptBase;
 
+  /// Add an active-low external reset input (`reset_n`) that ORs into the
+  /// power-on reset. A board reset button can then restart the whole SoC (core
+  /// to its reset vector, peripherals + DDR controller re-init) without a full
+  /// FPGA reconfig. Only affects the FPGA power-on-reset path; the ASIC/sim
+  /// path already takes a real external `reset` pin.
+  final bool externalReset;
+
   /// Creates a new SoC.
   ///
   /// Accepts an optional list of [clocks] to generate PLL-derived
@@ -138,6 +185,7 @@ class HarborSoC extends BridgeModule {
     this.svdVendor = 'Midstall',
     this.svdVersion = '1.0',
     this.interruptBase = 1,
+    this.externalReset = false,
     this.cpus = const [],
     this.target,
     List<HarborClockConfig> clocks = const [],
@@ -161,6 +209,11 @@ class HarborSoC extends BridgeModule {
     final usePowerOnReset = hasClockDomains && target is HarborFpgaTarget;
     if (!usePowerOnReset) {
       createPort('reset', PortDirection.input);
+    } else if (externalReset) {
+      // Active-low board reset (e.g. an Arty RESET button), ORed into the POR
+      // below so a press restarts the whole SoC. Held deasserted (high) by the
+      // pad's external pull-up when the button is not pressed.
+      createPort('reset_n', PortDirection.input);
     }
 
     final Logic resetSignal;
@@ -169,7 +222,10 @@ class HarborSoC extends BridgeModule {
       Sequential(input('clk'), [
         If(~porCount[7], then: [porCount < porCount + 1]),
       ]);
-      resetSignal = (~porCount[7]).named('porReset');
+      final por = (~porCount[7]).named('porReset');
+      resetSignal = externalReset
+          ? (por | ~input('reset_n')).named('sysReset')
+          : por;
     } else {
       resetSignal = input('reset');
     }
@@ -203,6 +259,7 @@ class HarborSoC extends BridgeModule {
         sourceHz: ddrSpec.sourceHz,
         coreClkHz: ddrSpec.coreClkHz,
       );
+      _xilinxCoreClkMhz = corePll.coreMhz;
       xilinxDdr3Clocks = buildXilinxDdr3ClockTree(
         this,
         source: shared,
@@ -210,8 +267,10 @@ class HarborSoC extends BridgeModule {
         ddrCkHz: ddrSpec.ddrCkHz,
         idelayRefHz: ddrSpec.idelayRefHz,
         dqsPhaseDeg: ddrSpec.dqsPhaseDeg,
-        // Core clock now comes from the dedicated corePll, not CLKOUT5.
+        // Core clock now comes from the dedicated corePll, not CLKOUT5. When the
+        // DDR runs a CK/8 controller, CLKOUT5 becomes that gearbox clock instead.
         coreClkHz: null,
+        ddrGearRatio: ddrSpec.ddrGearRatio,
       );
     } else {
       xilinxDdr3Clocks = null;
@@ -225,10 +284,21 @@ class HarborSoC extends BridgeModule {
             'xilinxDdr3Tree/coreClkHz was supplied to build its core clock.',
           );
         }
+        // Hold reset until BOTH the core PLL and the DDR3 clock-tree PLL have
+        // locked (the belt-and-suspenders timer in createDomainFromClock still
+        // releases if a LOCKED never reaches the fabric). Gating only on the
+        // core PLL left the DDR PLL's LOCKED unconnected, so the system could
+        // release reset before the DDR clock tree was stable, and nothing ever
+        // observed a DDR PLL lock-loss: a placement-independent, different-each-
+        // boot hazard on top of the DDR's own margin.
+        final ddrLocked = xilinxDdr3Clocks?.locked;
+        final combinedLocked = ddrLocked == null
+            ? corePll.locked
+            : (corePll.locked & ddrLocked).named('core_ddr_pll_locked');
         _clockDomains[clkConfig.name] = _clockGen.createDomainFromClock(
           clkConfig,
           corePll.coreClk,
-          locked: corePll.locked,
+          locked: combinedLocked,
         );
         continue;
       }
@@ -299,11 +369,37 @@ class HarborSoC extends BridgeModule {
 
     final dt = (peripheral as HarborDeviceTreeNodeProvider).dtNode;
     _peripherals.add(
-      _PeripheralEntry(module: peripheral, addressRange: dt.reg),
+      _PeripheralEntry(
+        module: peripheral,
+        addressRange: dt.reg,
+        clockDomainName: clockDomainName,
+      ),
     );
     _wireOnce(peripheral, clockDomainName);
+
+    // A driver that divides its input clock cannot work without knowing the
+    // rate. The peripheral does not know which domain it landed on, the SoC
+    // does, so fill it in rather than let the property go silently missing.
+    if (peripheral is HarborInputClockConsumer) {
+      final consumer = peripheral as HarborInputClockConsumer;
+      if (consumer.inputClockHz == 0) {
+        final hz = inputClockHzFor(clockDomainName);
+        if (hz > 0) consumer.provideInputClockHz(hz);
+      }
+    }
     return peripheral;
   }
+
+  /// Rate in Hz of the clock a peripheral registered under [clockDomainName]
+  /// actually runs on.
+  ///
+  /// Returns 0 when no clock domains are configured, because the peripheral
+  /// then rides the raw `clk` pin and only the board knows its rate. 0 leaves
+  /// the property OUT rather than emitting a guess: a missing `clock-frequency`
+  /// stops a driver at probe with a clear message, while a wrong one makes it
+  /// compute a wrong divider and fail somewhere much less obvious.
+  int inputClockHzFor(String? clockDomainName) =>
+      domainFor(clockDomainName)?.config.frequency ?? 0;
 
   /// Maps a SECOND wishbone slave interface of an already-added peripheral into
   /// the fabric at [range]. Unlike [addPeripheral] it does NOT register the
@@ -330,14 +426,33 @@ class HarborSoC extends BridgeModule {
   /// [busInterfaceName] is the name of the master's Wishbone provider
   /// interface (default `'dataBus'`).
   ///
+  /// When [pipeline] is set, a [WishboneRegisterStage] is interposed on this
+  /// master's leg to the arbiter, so a physically distant master (for example a
+  /// DMA engine at an I/O pad) drives a registered bus instead of a
+  /// die-crossing combinational one. That relieves routing congestion near the
+  /// arbiter at the cost of two extra bus-latency cycles on this master alone.
+  ///
+  /// [channel] names the fabric channel this master joins. Masters that share a
+  /// channel share one arbiter plus decoder. A master on its own channel gets
+  /// its own arbiter plus decoder, and meets the other channels only at a slave
+  /// that both channels reach (see [buildFabric]'s `channelSlaves`). The default
+  /// `'primary'` keeps the classic single-fabric SoC.
+  ///
   /// Clock and reset are auto-wired.
   T addMaster<T extends BridgeModule>(
     T master, {
     String busInterfaceName = 'dataBus',
     String? clockDomainName,
+    bool pipeline = false,
+    String channel = 'primary',
   }) {
     _masters.add(
-      _MasterEntry(module: master, busInterfaceName: busInterfaceName),
+      _MasterEntry(
+        module: master,
+        busInterfaceName: busInterfaceName,
+        pipeline: pipeline,
+        channel: channel,
+      ),
     );
     _wireOnce(master, clockDomainName);
     return master;
@@ -351,10 +466,50 @@ class HarborSoC extends BridgeModule {
     String portName, {
     String? externalName,
   }) {
-    return pullUpPort(
-      peripheral.port(portName),
-      newPortName: externalName ?? '${peripheral.name}_$portName',
-    );
+    final topName = externalName ?? '${peripheral.name}_$portName';
+    // Remembered so a sim model can be told the TOP-LEVEL name of a pin it
+    // has to read; the peripheral itself only knows its own port names.
+    (_exposedPins[peripheral] ??= {})[portName] = topName;
+    return pullUpPort(peripheral.port(portName), newPortName: topName);
+  }
+
+  /// Peripheral -> (its port name -> top-level port name), for every pin
+  /// pulled up with [exposePin].
+  final Map<BridgeModule, Map<String, String>> _exposedPins = {};
+
+  /// Top-level names of [peripheral]'s exposed pins. Empty if it has none.
+  Map<String, String> exposedPinsOf(BridgeModule peripheral) =>
+      Map.unmodifiable(_exposedPins[peripheral] ?? const {});
+
+  /// The top-level clock port and frequency a peripheral actually runs on
+  /// under [HarborSimTarget].
+  ///
+  /// Under that target every non-primary domain is its own top-level input
+  /// named `<domain>_clk` (see `HarborClockGenerator`), and the primary is
+  /// plain `clk`. A host-side model has to agree with this or it samples at
+  /// the wrong rate: a UART sink ticked on a 100 MHz clock while sizing its
+  /// bit period from a 50 MHz one decodes pure garbage.
+  ({String port, int hz}) simClockOf(BridgeModule peripheral, int primaryHz) {
+    final entry = _peripherals
+        .where((e) => identical(e.module, peripheral))
+        .firstOrNull;
+    final domainName = entry?.clockDomainName;
+    // A peripheral with no explicit domain is wired to [defaultClock] (the
+    // 'sys' bus domain when present), NOT the primary input clock. Resolve the
+    // same fallback so the reported clock matches the one the peripheral's bus
+    // is actually clocked by, which is what a sim model must sample.
+    final domain =
+        (domainName != null ? _clockDomains[domainName] : null) ??
+        _clockDomains['sys'] ??
+        _clockDomains.values.firstOrNull;
+    if (domain == null || domain.config.isPrimary) {
+      return (port: 'clk', hz: primaryHz);
+    }
+    // A domain with no port of its own IS the input clock (it runs at the
+    // source rate), so a model on it samples `clk`.
+    final port = domain.simPort;
+    if (port == null) return (port: 'clk', hz: primaryHz);
+    return (port: port, hz: domain.config.frequency);
   }
 
   /// Checks the SoC for build-time integrity problems and returns every
@@ -431,7 +586,29 @@ class HarborSoC extends BridgeModule {
   ///
   /// Must be called after all [addPeripheral] and [addMaster]
   /// calls, before [build].
-  void buildFabric() {
+  /// Builds the bus fabric connecting masters to peripherals.
+  ///
+  /// When [pipeline] is set, a [WishboneRegisterStage] is interposed at the
+  /// decoder's master port, so the master -> arbiter -> decoder -> slave -> back
+  /// path is registered instead of fully combinational. That raises the fabric
+  /// clock ceiling at the cost of two extra cycles of bus latency per transfer.
+  ///
+  /// [channelSlaves] turns the one fabric into N named channels. It maps a
+  /// channel name to the SET of slave module names that channel can reach. Each
+  /// channel gets its own arbiter plus decoder over just those slaves. A slave
+  /// that more than one channel reaches is shared through a convergence arbiter
+  /// (see [converge]). When [channelSlaves] is null there is one `'primary'`
+  /// channel that reaches every slave, which is byte identical to the historic
+  /// fabric. A channel that has masters must appear in [channelSlaves].
+  ///
+  /// [converge] selects how a shared slave merges its channels. Only
+  /// [HarborMemConverge.arbiter] is built. The other modes throw
+  /// [UnimplementedError].
+  void buildFabric({
+    bool pipeline = false,
+    Map<String, Set<String>>? channelSlaves,
+    HarborMemConverge converge = HarborMemConverge.arbiter,
+  }) {
     final errors = validate();
     if (errors.isNotEmpty) {
       throw StateError('Validation errors in $name:\n${errors.join("\n")}');
@@ -441,7 +618,12 @@ class HarborSoC extends BridgeModule {
 
     switch (busConfig) {
       case WishboneConfig wbConfig:
-        _buildWishboneFabric(wbConfig);
+        _buildWishboneFabric(
+          wbConfig,
+          pipeline: pipeline,
+          channelSlaves: channelSlaves,
+          converge: converge,
+        );
       default:
         throw UnsupportedError(
           'Bus protocol ${busConfig.runtimeType} not yet supported in buildFabric',
@@ -449,7 +631,12 @@ class HarborSoC extends BridgeModule {
     }
   }
 
-  void _buildWishboneFabric(WishboneConfig wbConfig) {
+  void _buildWishboneFabric(
+    WishboneConfig wbConfig, {
+    bool pipeline = false,
+    Map<String, Set<String>>? channelSlaves,
+    HarborMemConverge converge = HarborMemConverge.arbiter,
+  }) {
     // Primary peripheral buses first, then any secondary slaves (each a distinct
     // decoder slot). Both feed the same address-decode + connect loop below.
     final slaves =
@@ -463,6 +650,57 @@ class HarborSoC extends BridgeModule {
               range: s.addressRange,
             ),
         ];
+
+    // Group masters by channel, keeping the add order inside each channel.
+    final byChannel = <String, List<_MasterEntry>>{};
+    for (final m in _masters) {
+      byChannel.putIfAbsent(m.channel, () => []).add(m);
+    }
+
+    // The set of slave list indices a channel can reach. A null map is the
+    // classic SoC: the one channel reaches every slave.
+    Set<int> reachableFor(String channel) {
+      if (channelSlaves == null) {
+        return {for (var i = 0; i < slaves.length; i++) i};
+      }
+      final names = channelSlaves[channel];
+      if (names == null) {
+        throw StateError(
+          'channel "$channel" has masters but is absent from channelSlaves',
+        );
+      }
+      return {
+        for (var i = 0; i < slaves.length; i++)
+          if (names.contains(slaves[i].module.name)) i,
+      };
+    }
+
+    // One channel that reaches every slave is byte identical to the historic
+    // fabric, so take the exact old path. This keeps creek and delta unchanged.
+    final onlyOneChannel = byChannel.length == 1;
+    final singleChannel = byChannel.keys.first;
+    if (onlyOneChannel && reachableFor(singleChannel).length == slaves.length) {
+      _buildSingleChannelWishboneFabric(wbConfig, slaves, pipeline: pipeline);
+      return;
+    }
+
+    _buildMultiChannelWishboneFabric(
+      wbConfig,
+      slaves,
+      byChannel,
+      reachableFor,
+      pipeline: pipeline,
+      converge: converge,
+    );
+  }
+
+  /// The historic one-fabric path: all masters -> one arbiter -> one decoder ->
+  /// all slaves. Kept verbatim so its emitted netlist stays byte identical.
+  void _buildSingleChannelWishboneFabric(
+    WishboneConfig wbConfig,
+    List<({BridgeModule module, String iface, BusAddressRange range})> slaves, {
+    bool pipeline = false,
+  }) {
     final mappings = slaves.indexed
         .map((e) => HarborAddressMapping(range: e.$2.range, slaveIndex: e.$1))
         .toList();
@@ -470,13 +708,26 @@ class HarborSoC extends BridgeModule {
     final decoder = WishboneDecoder(wbConfig, mappings);
     addSubModule(decoder);
 
+    // Whatever drives the decoder's master port: the decoder directly, or a
+    // register slice interposed in front of it when [pipeline] is set.
+    var decoderUpstream = decoder.interface('master');
+    if (pipeline) {
+      final reg = WishboneRegisterStage(config: wbConfig);
+      addSubModule(reg);
+      final (clk, reset) = defaultClock;
+      reg.input('clk').srcConnection! <= clk;
+      reg.input('reset').srcConnection! <= reset;
+      connectInterfaces(reg.interface('down'), decoder.interface('master'));
+      decoderUpstream = reg.interface('up');
+    }
+
     // One master -> straight to the decoder. Multiple masters -> merge them
     // through a WishboneArbiter first (round-robin, grant-locked) so they share
     // the single decoder/peripheral fabric without multi-driving it.
     if (_masters.length == 1) {
       connectInterfaces(
-        _masters[0].module.interface(_masters[0].busInterfaceName),
-        decoder.interface('master'),
+        _masterFabricPort(_masters[0], wbConfig),
+        decoderUpstream,
       );
     } else {
       final arbiter = WishboneArbiter(
@@ -490,14 +741,11 @@ class HarborSoC extends BridgeModule {
       arbiter.input('reset').srcConnection! <= reset;
       for (var i = 0; i < _masters.length; i++) {
         connectInterfaces(
-          _masters[i].module.interface(_masters[i].busInterfaceName),
+          _masterFabricPort(_masters[i], wbConfig),
           arbiter.interface('master_$i'),
         );
       }
-      connectInterfaces(
-        arbiter.interface('slave'),
-        decoder.interface('master'),
-      );
+      connectInterfaces(arbiter.interface('slave'), decoderUpstream);
     }
 
     // Connect decoder's slave interfaces to the primary + secondary slaves.
@@ -507,6 +755,161 @@ class HarborSoC extends BridgeModule {
         slaves[i].module.interface(slaves[i].iface),
       );
     }
+  }
+
+  /// The N-channel path. Each channel gets its own arbiter plus decoder over its
+  /// own reachable slave subset. A slave that more than one channel reaches is
+  /// merged by a convergence arbiter at that slave.
+  void _buildMultiChannelWishboneFabric(
+    WishboneConfig wbConfig,
+    List<({BridgeModule module, String iface, BusAddressRange range})> slaves,
+    Map<String, List<_MasterEntry>> byChannel,
+    Set<int> Function(String channel) reachableFor, {
+    bool pipeline = false,
+    HarborMemConverge converge = HarborMemConverge.arbiter,
+  }) {
+    // A channel with masters that is absent from channelSlaves is an error.
+    // reachableFor throws for such a channel, so the loop below surfaces it.
+
+    // Deterministic channel order: 'primary' first when present, then the rest
+    // sorted by name. This fixes the submodule order so regens stay stable.
+    final channelNames = byChannel.keys.toList()
+      ..sort((a, b) {
+        if (a == b) return 0;
+        if (a == 'primary') return -1;
+        if (b == 'primary') return 1;
+        return a.compareTo(b);
+      });
+
+    final (clk, reset) = defaultClock;
+
+    // Each channel decoder's slave port, keyed by global slave index. A slave
+    // with more than one entry is shared and needs a convergence arbiter.
+    final drivers = <int, List<InterfaceReference>>{};
+
+    for (final channel in channelNames) {
+      final masters = byChannel[channel]!;
+      final reachable = reachableFor(channel).toList()..sort();
+      if (reachable.isEmpty) {
+        throw StateError('channel "$channel" reaches no slave');
+      }
+
+      final mappings = [
+        for (final gi in reachable)
+          HarborAddressMapping(range: slaves[gi].range, slaveIndex: gi),
+      ];
+      final decoder = WishboneDecoder(
+        wbConfig,
+        mappings,
+        name: 'wishbone_decoder_$channel',
+      );
+      addSubModule(decoder);
+
+      // Optional per-channel register slice at the decoder master port, same as
+      // the single-channel `pipeline` behaviour.
+      var decoderUpstream = decoder.interface('master');
+      if (pipeline) {
+        final reg = WishboneRegisterStage(config: wbConfig);
+        addSubModule(reg);
+        reg.input('clk').srcConnection! <= clk;
+        reg.input('reset').srcConnection! <= reset;
+        connectInterfaces(reg.interface('down'), decoder.interface('master'));
+        decoderUpstream = reg.interface('up');
+      }
+
+      // One master on the channel -> straight to its decoder. More than one ->
+      // merge them through the channel arbiter first.
+      if (masters.length == 1) {
+        connectInterfaces(
+          _masterFabricPort(masters[0], wbConfig),
+          decoderUpstream,
+        );
+      } else {
+        final arbiter = WishboneArbiter(
+          numMasters: masters.length,
+          config: wbConfig,
+          name: 'wishbone_arbiter_$channel',
+        );
+        addSubModule(arbiter);
+        arbiter.input('clk').srcConnection! <= clk;
+        arbiter.input('reset').srcConnection! <= reset;
+        for (var i = 0; i < masters.length; i++) {
+          connectInterfaces(
+            _masterFabricPort(masters[i], wbConfig),
+            arbiter.interface('master_$i'),
+          );
+        }
+        connectInterfaces(arbiter.interface('slave'), decoderUpstream);
+        // Keep fabricArbiter pointing at the primary channel for back-compat.
+        if (channel == 'primary') fabricArbiter = arbiter;
+      }
+
+      for (var k = 0; k < reachable.length; k++) {
+        drivers
+            .putIfAbsent(reachable[k], () => [])
+            .add(decoder.interface('slave_$k'));
+      }
+    }
+
+    // Every slave must be reachable from at least one channel. An orphan slave
+    // would have undriven bus inputs, so fail loudly instead.
+    final orphans = [
+      for (var gi = 0; gi < slaves.length; gi++)
+        if (!drivers.containsKey(gi)) slaves[gi].module.name,
+    ];
+    if (orphans.isNotEmpty) {
+      throw StateError(
+        'slaves unreachable from every channel: ${orphans.join(", ")}',
+      );
+    }
+
+    // Hook each slave up. One driver connects straight. More than one driver
+    // means channels share the slave, so a convergence arbiter merges them.
+    for (var gi = 0; gi < slaves.length; gi++) {
+      final ds = drivers[gi]!;
+      final slaveIface = slaves[gi].module.interface(slaves[gi].iface);
+      if (ds.length == 1) {
+        connectInterfaces(ds[0], slaveIface);
+        continue;
+      }
+      if (converge != HarborMemConverge.arbiter) {
+        throw UnimplementedError(
+          'converge ${converge.name} not yet implemented',
+        );
+      }
+      final conv = WishboneArbiter(
+        numMasters: ds.length,
+        config: wbConfig,
+        name: 'wishbone_converge_${slaves[gi].module.name}',
+      );
+      addSubModule(conv);
+      conv.input('clk').srcConnection! <= clk;
+      conv.input('reset').srcConnection! <= reset;
+      for (var i = 0; i < ds.length; i++) {
+        connectInterfaces(ds[i], conv.interface('master_$i'));
+      }
+      connectInterfaces(conv.interface('slave'), slaveIface);
+    }
+  }
+
+  /// The interface the fabric (arbiter or lone decoder) connects to for master
+  /// [m]. When the master requested a pipelined leg, a [WishboneRegisterStage]
+  /// is interposed here so its bus to the arbiter is registered rather than a
+  /// long combinational route (see [addMaster]'s `pipeline`). Otherwise the
+  /// master's own bus interface is returned directly.
+  InterfaceReference _masterFabricPort(
+    _MasterEntry m,
+    WishboneConfig wbConfig,
+  ) {
+    final port = m.module.interface(m.busInterfaceName);
+    if (!m.pipeline) return port;
+    final reg = WishboneRegisterStage(config: wbConfig);
+    addSubModule(reg);
+    final (clk, reset) = defaultClock;
+    reg.input('clk').srcConnection! <= clk;
+    reg.input('reset').srcConnection! <= reset;
+    connectInterfaces(port, reg.interface('up'));
+    return reg.interface('down');
   }
 
   /// Assigns an interrupt source number to every peripheral that sources an
@@ -716,10 +1119,124 @@ class HarborSoC extends BridgeModule {
     final t = target;
     if (t != null) {
       switch (t) {
+        case HarborSimTarget():
+          // Behavioral bodies for leaves that only exist in simulation. These
+          // go into the filelist so Verilator compiles them with the design;
+          // blackboxes.v is a synthesis artifact and is NOT in the filelist.
+          //
+          // Every leaf must supply one. A stubbed leaf drives X into the
+          // design and reads as a design bug, so refuse the build instead.
+          final leaves = <BridgeModule>[];
+          _collectLeafModules(this, leaves);
+          final unimplemented = <String>{};
+          final extraRtl = <String>[];
+          final writtenLeaves = <String>{};
+          for (final leaf in leaves) {
+            if (leaf is! HarborSimLeaf) {
+              unimplemented.add(leaf.definitionName);
+              continue;
+            }
+            // Name the file after the module, so the two cannot disagree.
+            if (!writtenLeaves.add(leaf.definitionName)) continue;
+            final rel = 'sim/${leaf.definitionName}.sv';
+            final f = File('$path/$rel')..parent.createSync(recursive: true);
+            f.writeAsStringSync((leaf as HarborSimLeaf).simRtl);
+            extraRtl.add('./$rel');
+          }
+          if (unimplemented.isNotEmpty) {
+            throw StateError(
+              'Verilator target: these leaf modules have no behavioral model, '
+              'so the simulation would see them as undriven X: '
+              '${(unimplemented.toList()..sort()).join(', ')}. '
+              'Mix HarborSimLeaf into each, or keep them off the sim build.',
+            );
+          }
+          if (extraRtl.isNotEmpty) {
+            File('$path/filelist.f').writeAsStringSync(
+              '${filelist.toString()}${extraRtl.join('\n')}\n',
+            );
+          }
+
+          // The clock wheel needs every domain's port name and frequency, and
+          // the primary input clock, which only the SoC knows.
+          // Only the domains that actually became top-level inputs. A domain
+          // running at the source rate short-circuits to the input clock and
+          // has no port of its own, so listing it by name would make the
+          // harness bind a port that does not exist.
+          final domains = <String, int>{
+            for (final e in _clockDomains.entries)
+              if (e.value.simPort case final port?)
+                port: e.value.config.frequency,
+          };
+          // Host-side C++ models, one context per module so each is told the
+          // TOP-LEVEL names its own pins were exposed under. Masters are
+          // scanned too: what hangs off a pin does not depend on which side of
+          // the fabric the module sits on (a display's TMDS lanes reach a
+          // monitor whether or not it also answers as a slave). A dual-role
+          // module is asked once.
+          final models = <HarborSimModel>[];
+          final askedForModels = <BridgeModule>{};
+          for (final p
+              in peripherals
+                  .followedBy(masters)
+                  .whereType<HarborSimModelProvider>()) {
+            final mod = p as BridgeModule;
+            if (!askedForModels.add(mod)) continue;
+            final periClk = simClockOf(mod, t.frequency);
+            models.addAll(
+              p.simModels(
+                HarborSimModelContext(
+                  exposedPins: exposedPinsOf(mod),
+                  clockHz: t.frequency,
+                  primaryClockPort: 'clk',
+                  peripheralClockPort: periClk.port,
+                  peripheralClockHz: periClk.hz,
+                ),
+              ),
+            );
+          }
+          // One header per class, however many instances use it.
+          final writtenHeaders = <String>{};
+          for (final m in models) {
+            if (!writtenHeaders.add(m.headerPath)) continue;
+            final f = File('$path/${m.headerPath}')
+              ..parent.createSync(recursive: true);
+            f.writeAsStringSync(m.header);
+          }
+
+          final jtag = masters.whereType<HarborJtagDebug>();
+          Directory('$path/sim').createSync(recursive: true);
+          File('$path/sim/main.cpp').writeAsStringSync(
+            t.generateMain(
+              topCell: t.topCell,
+              clockPorts: domains,
+              models: models,
+              hasJtag: jtag.isNotEmpty,
+            ),
+          );
+          File(
+            '$path/Makefile',
+          ).writeAsStringSync(t.generateMakefile(name, models: models));
+          if (jtag.isNotEmpty) {
+            final dm = jtag.first;
+            File('$path/openocd.cfg').writeAsStringSync(
+              t.generateOpenocdConfig(dmIdcode: dm.jtagDmIdcode),
+            );
+          }
         case HarborFpgaTarget():
+          // Only constrain pins the design actually exposes. A board defines a
+          // pin for every connector it carries (an unused HDMI header, a spare
+          // Pmod); a constraint for a port the netlist has no top-level signal
+          // for makes nextpnr reject the design. inOuts covers the bidirectional
+          // pads (DDR DQ, SD CMD/DAT).
+          final knownPorts = <String>{
+            ...inputs.keys,
+            ...outputs.keys,
+            ...inOuts.keys,
+          };
           File(
             '$path/$name.${t.constraintExtension}',
-          ).writeAsStringSync(t.generateConstraints());
+          ).writeAsStringSync(t.generateConstraints(knownPorts: knownPorts));
           final rtlDir = Directory('$path/rtl');
           final svFiles = rtlDir.existsSync()
               ? rtlDir
@@ -760,6 +1277,30 @@ class HarborSoC extends BridgeModule {
               File(
                 '$path/support/nextpnr/show_bels.py',
               ).writeAsStringSync(t.generateDdrShowBelsPy());
+              // Over-constrain the derived core + DDR-controller clocks via a
+              // --pre-pack addClock. nextpnr-xilinx does NOT propagate the XDC
+              // create_clock through the PLL/BUFG, so these domains reach the
+              // timing engine UNCONSTRAINED (zero margin, setup-only, single-
+              // corner). addClock at a rate ABOVE the real one forces timing-
+              // driven placement/routing to prioritise them and makes silicon
+              // margin show up as an honest WNS. --timing-allow-fail keeps a
+              // bitstream written when the aggressive target is not met.
+              final coreMhz = _xilinxCoreClkMhz;
+              // The over-constraint targets the `ddr_clk` net = the controller
+              // LOGIC clock (controllerClk), which is CK/8 at gearRatio 2 and
+              // CK/4 at gearRatio 1. Use controllerClkMhz (the realised logic
+              // rate), NOT controllerMhz (the SERDES/CLKDIV rate, which stays
+              // CK/4). At gearRatio 1 the two are equal, so this is byte-
+              // identical for the legacy path.
+              final ddrCtrlMhz = xilinxDdr3Clocks?.controllerClkMhz;
+              if (coreMhz != null && ddrCtrlMhz != null) {
+                File('$path/support/nextpnr/clocks.py').writeAsStringSync(
+                  t.generateClockConstraintPy(
+                    coreClkMhz: coreMhz,
+                    ddrCtrlMhz: ddrCtrlMhz,
+                  ),
+                );
+              }
             }
           }
         case HarborAsicTarget():
@@ -880,7 +1421,16 @@ class _PeripheralEntry {
   final BridgeModule module;
   final BusAddressRange addressRange;
 
-  const _PeripheralEntry({required this.module, required this.addressRange});
+  /// Clock domain this peripheral was wired to, or null for the default. Kept
+  /// so a sim model can be ticked on the domain its peripheral actually runs
+  /// on rather than assuming the primary.
+  final String? clockDomainName;
+
+  const _PeripheralEntry({
+    required this.module,
+    required this.addressRange,
+    this.clockDomainName,
+  });
 }
 
 /// A secondary bus slave of an already-registered peripheral (see
@@ -900,6 +1450,17 @@ class _SecondarySlave {
 class _MasterEntry {
   final BridgeModule module;
   final String busInterfaceName;
+  final bool pipeline;
 
-  const _MasterEntry({required this.module, required this.busInterfaceName});
+  /// The fabric channel this master lives on. Masters on the same channel share
+  /// one arbiter plus decoder. The default `'primary'` keeps every master on
+  /// one channel, which is the classic single-fabric SoC.
+  final String channel;
+
+  const _MasterEntry({
+    required this.module,
+    required this.busInterfaceName,
+    this.pipeline = false,
+    this.channel = 'primary',
+  });
 }

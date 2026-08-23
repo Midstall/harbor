@@ -31,8 +31,8 @@ void main() {
       final tb = PeripheralTestBench(media);
       await tb.init();
 
-      // ENGINE_CAPS at word address 2
-      final caps = await tb.read(2);
+      // ENGINE_CAPS at byte offset 0x10
+      final caps = await tb.read(0x10);
       expect(caps & 0x01, equals(0x01), reason: 'H.264 bit');
       expect(caps & 0x10, equals(0x10), reason: 'JPEG bit');
 
@@ -57,9 +57,9 @@ void main() {
       final tb = PeripheralTestBench(media);
       await tb.init();
 
-      // INT_ENABLE at word address 5
-      await tb.write(5, 0x0F);
-      final intEn = await tb.read(5);
+      // INT_ENABLE at byte offset 0x28
+      await tb.write(0x28, 0x0F);
+      final intEn = await tb.read(0x28);
       expect(intEn & 0x0F, equals(0x0F));
 
       await Simulator.endSimulation();
@@ -83,9 +83,9 @@ void main() {
       final tb = PeripheralTestBench(media);
       await tb.init();
 
-      // ENGINE_CTRL at word address 0
-      await tb.write(0, 0x01);
-      final ctrl = await tb.read(0);
+      // ENGINE_CTRL at byte offset 0x00
+      await tb.write(0x00, 0x01);
+      final ctrl = await tb.read(0x00);
       expect(ctrl & 0x01, equals(0x01));
 
       await Simulator.endSimulation();

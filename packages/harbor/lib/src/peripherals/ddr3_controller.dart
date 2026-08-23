@@ -97,11 +97,13 @@ class Ddr3Controller extends Module {
   }) : timing = DdrTiming.fromPs(
          ddr3ClkPeriodPs: params.ddr3ClkPeriodPs,
          serdesRatio: params.serdesRatio,
+         controllerClkRatio: params.controllerClkRatio,
        ),
        modeRegs = Ddr3ModeRegisters(
          DdrTiming.fromPs(
            ddr3ClkPeriodPs: params.ddr3ClkPeriodPs,
            serdesRatio: params.serdesRatio,
+           controllerClkRatio: params.controllerClkRatio,
          ),
        ) {
     // --- clocks/reset ---
@@ -976,11 +978,36 @@ class Ddr3Controller extends Module {
     _oWbData <= mux(indexWbData, oWbDataQ[1], oWbDataQ[0]);
   }
 
+  /// Read-return pipe base offset, in CONTROLLER cycles, from the read command
+  /// to the cycle its CL-latency data lands. The within-window term `(serdes - 1
+  /// - READ_SLOT + 1)` = `(serdes - READ_SLOT)` is CK inside the 4-slot command
+  /// word (scales with [serdes]); the `~/ controllerClkRatio` converts the CK
+  /// gap into controller cycles (CK/8 at gearRatio 2), so the read command->data
+  /// CK separation stays CL. gearRatio 1: (6-(4-2))~/4 = 1 (unchanged). gearRatio
+  /// 2: (6-(4-2))~/8 = 0 (the data lands one CK/8 cycle sooner in cycle-count,
+  /// same real CK offset).
   int get _readDelay {
-    // floor((CL_nCK - (3 - READ_SLOT + 1)) / 4)
-    final v = DdrTiming.clNck - (3 - timing.readSlot + 1);
-    return v ~/ 4;
+    final v = DdrTiming.clNck - (serdes - 1 - timing.readSlot + 1);
+    return v ~/ params.controllerClkRatio;
   }
+
+  /// STAGE2_DATA_DEPTH / read-delay, exposed so a CWL/CL differential test can
+  /// assert the command->data / command->capture CK separations are identical
+  /// across gearRatio (the gearbox correctness proof).
+  int get stage2DataDepth => _stage2DataDepth;
+  int get readDelay => _readDelay;
+
+  /// CK from a WRITE command to the launch of its BL8 data burst. Must equal
+  /// CWL (5) for the DRAM regardless of gearRatio: at CK/8 the whole-cycle depth
+  /// halves (2 -> 1) while the mod-4 write slot is unchanged, so
+  /// controllerClkRatio*depth - writeSlot stays 5.
+  int get writeCommandToDataCk =>
+      params.controllerClkRatio * _stage2DataDepth - timing.writeSlot;
+
+  /// CK from a READ command to when the DRAM's returned data is on the bus
+  /// (= CL, 6). The read command keeps its mod-4 slot across gearRatio, so the
+  /// command->data-return separation is the DRAM's fixed CL either way.
+  int get readCommandToDataCk => DdrTiming.clNck;
 
   static int _clog2(int x) {
     var n = 0;
@@ -1069,10 +1096,17 @@ class Ddr3Controller extends Module {
   late final Logic _addedReadPipeMax; // calibration read-latency (4-bit)
   late final List<Logic> _addedReadPipeLane; // per-lane read latency
 
-  /// STAGE2_DATA_DEPTH: the write-data shift-register depth for the CWL launch
-  /// pipeline (ddr3_controller.v:250).
+  /// STAGE2_DATA_DEPTH: the write-data shift-register depth (whole controller
+  /// cycles) for the CWL launch pipeline (ddr3_controller.v:250). The within-
+  /// window term `(serdes - 1 - WRITE_SLOT + 1)` = `(serdes - WRITE_SLOT)` is CK
+  /// inside the 4-slot command word (scales with [serdes], stays 4-wide); the
+  /// `~/ controllerClkRatio` is the CK-per-controller-cycle conversion (8 at
+  /// gearRatio 2). gearRatio 1: (5-(4-3))~/4 + 1 = 2. gearRatio 2:
+  /// (5-(4-3))~/8 + 1 = 1. Either way controllerClkRatio*depth - writeSlot = CWL.
   int get _stage2DataDepth =>
-      (DdrTiming.cwlNck - (3 - timing.writeSlot + 1)) ~/ 4 + 1;
+      (DdrTiming.cwlNck - (serdes - 1 - timing.writeSlot + 1)) ~/
+          params.controllerClkRatio +
+      1;
 
   int get _lanesClog2 => lanes <= 1 ? 1 : (lanes - 1).bitLength;
 

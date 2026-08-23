@@ -310,9 +310,7 @@ class HarborDeviceTreeGenerator {
         }
 
         for (final entry in node.properties.entries) {
-          buf.writeln(
-            '            ${entry.key} = ${_formatValue(entry.value)};',
-          );
+          _emitProperty(buf, '            ', entry.key, entry.value);
         }
 
         for (final child in node.children) {
@@ -333,7 +331,7 @@ class HarborDeviceTreeGenerator {
   void _emitChild(StringBuffer buf, HarborDeviceTreeChild c, String indent) {
     buf.writeln('$indent${c.name} {');
     for (final entry in c.properties.entries) {
-      buf.writeln('$indent    ${entry.key} = ${_formatValue(entry.value)};');
+      _emitProperty(buf, '$indent    ', entry.key, entry.value);
     }
     for (final child in c.children) {
       _emitChild(buf, child, '$indent    ');
@@ -341,13 +339,46 @@ class HarborDeviceTreeGenerator {
     buf.writeln('$indent};');
   }
 
+  /// Emits one property line. A DTS boolean is the bare property name (its
+  /// presence means true); a false boolean is omitted entirely. Everything
+  /// else is `key = <value>;`.
+  void _emitProperty(
+    StringBuffer buf,
+    String indent,
+    String key,
+    Object value,
+  ) {
+    if (value is bool) {
+      if (value) buf.writeln('$indent$key;');
+      return;
+    }
+    buf.writeln('$indent$key = ${_formatValue(value)};');
+  }
+
   String _formatValue(Object value) {
     if (value is String) return '"$value"';
     if (value is int) return '<$value>';
-    if (value is bool) return value ? '' : '/* false */';
     if (value is List<int>) {
       return '<${value.map((v) => '0x${v.toRadixString(16)}').join(' ')}>';
     }
     return '"$value"';
   }
+}
+
+/// A peripheral whose driver cannot work without knowing the rate of the clock
+/// it is wired to: a UART picks a baud divisor from it, an SPI or SDIO
+/// controller picks a bus-clock divider, an I2C controller a prescaler.
+///
+/// These all used to take the rate as a constructor argument defaulting to 0,
+/// and quietly OMIT the property when nobody passed one. The node then looked
+/// well-formed but the Linux driver refused to probe (`no controller clock
+/// rate`). The SoC knows the answer, so it fills it in: see
+/// `HarborSoC.addPeripheral`. An explicitly supplied rate is never overridden.
+mixin HarborInputClockConsumer {
+  /// Rate in Hz, 0 when still unknown.
+  int get inputClockHz;
+
+  /// Called by the SoC with the rate of the clock domain this peripheral was
+  /// wired to. Implementations must ignore it once a rate is known.
+  void provideInputClockHz(int hz);
 }

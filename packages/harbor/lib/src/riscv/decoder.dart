@@ -152,7 +152,17 @@ class RiscVInstructionDecoder extends Module {
       }
 
       if (op.funct7 != null) {
-        cond = cond & instr.getRange(25, 32).eq(Const(op.funct7!, width: 7));
+        if (op.opcode == RiscvOpcode.amo) {
+          // AMO/LR/SC: funct7[6:2] is funct5 (the operation selector) and
+          // funct7[1:0] are the aq/rl ordering hints. The hints do not select
+          // an operation, so decode MUST ignore them: match funct5 only. Else
+          // ordered atomics (sc.w.rl, amoadd.w.aqrl, ...) raise illegal.
+          cond =
+              cond &
+              instr.getRange(27, 32).eq(Const(op.funct7! >> 2, width: 5));
+        } else {
+          cond = cond & instr.getRange(25, 32).eq(Const(op.funct7!, width: 7));
+        }
       }
 
       conditions.add(

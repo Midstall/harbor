@@ -20,9 +20,9 @@ void main() {
       final tb = PeripheralTestBench(audio);
       await tb.init();
 
-      // VOLUME_L at word address 16 (byte 0x40)
-      await tb.write(16, 200);
-      final volL = await tb.read(16);
+      // VOLUME_L at byte offset 0x80
+      await tb.write(0x80, 200);
+      final volL = await tb.read(0x80);
       expect(volL & 0xFF, equals(200));
 
       await Simulator.endSimulation();
@@ -39,9 +39,9 @@ void main() {
       final tb = PeripheralTestBench(audio);
       await tb.init();
 
-      // VOLUME_R at word address 17 (byte 0x44)
-      await tb.write(17, 128);
-      final volR = await tb.read(17);
+      // VOLUME_R at byte offset 0x88
+      await tb.write(0x88, 128);
+      final volR = await tb.read(0x88);
       expect(volR & 0xFF, equals(128));
 
       await Simulator.endSimulation();
@@ -58,9 +58,9 @@ void main() {
       final tb = PeripheralTestBench(audio);
       await tb.init();
 
-      // MUTE at word address 18 (byte 0x48)
-      await tb.write(18, 0x03);
-      final mute = await tb.read(18);
+      // MUTE at byte offset 0x90
+      await tb.write(0x90, 0x03);
+      final mute = await tb.read(0x90);
       expect(mute & 0x03, equals(0x03));
 
       await Simulator.endSimulation();
@@ -77,9 +77,9 @@ void main() {
       final tb = PeripheralTestBench(audio);
       await tb.init();
 
-      // CTRL at word address 0
-      await tb.write(0, 0x01);
-      final ctrl = await tb.read(0);
+      // CTRL at byte offset 0x00
+      await tb.write(0x00, 0x01);
+      final ctrl = await tb.read(0x00);
       expect(ctrl & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -96,9 +96,9 @@ void main() {
       final tb = PeripheralTestBench(audio);
       await tb.init();
 
-      // INT_ENABLE at word address 15 (byte 0x3C)
-      await tb.write(15, 0xFF);
-      final intEn = await tb.read(15);
+      // INT_ENABLE at byte offset 0x78
+      await tb.write(0x78, 0xFF);
+      final intEn = await tb.read(0x78);
       expect(intEn & 0xFF, equals(0xFF));
 
       await Simulator.endSimulation();

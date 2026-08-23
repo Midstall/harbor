@@ -2,28 +2,33 @@
 /*
  * Harbor GPIO controller driver
  *
- * Register map:
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour.
+ *
  *   0x00: INPUT      (RO) - Current pin values
- *   0x04: OUTPUT     (RW) - Output values
- *   0x08: DIR        (RW) - Direction (1=output, 0=input)
- *   0x0C: IRQ_EN     (RW) - Interrupt enable per pin
- *   0x10: IRQ_STATUS (W1C) - Interrupt status
- *   0x14: IRQ_EDGE   (RW) - 0=level, 1=edge triggered
+ *   0x08: OUTPUT     (RW) - Output values
+ *   0x10: DIR        (RW) - Direction (1=output, 0=input)
+ *   0x18: IRQ_EN     (RW) - Interrupt enable per pin
+ *   0x20: IRQ_STATUS (W1C) - Interrupt status
+ *   0x28: IRQ_EDGE   (RW) - 0=level, 1=edge triggered
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/gpio/driver.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of.h>
 
 #define HARBOR_GPIO_INPUT      0x00
-#define HARBOR_GPIO_OUTPUT     0x04
-#define HARBOR_GPIO_DIR	       0x08
-#define HARBOR_GPIO_IRQ_EN     0x0C
-#define HARBOR_GPIO_IRQ_STATUS 0x10
-#define HARBOR_GPIO_IRQ_EDGE   0x14
+#define HARBOR_GPIO_OUTPUT     0x08
+#define HARBOR_GPIO_DIR	       0x10
+#define HARBOR_GPIO_IRQ_EN     0x18
+#define HARBOR_GPIO_IRQ_STATUS 0x20
+#define HARBOR_GPIO_IRQ_EDGE   0x28
 
 struct harbor_gpio {
 	void __iomem *base;
@@ -195,7 +200,7 @@ static int harbor_gpio_probe(struct platform_device *pdev)
 
 	{
 		u32 ngpios = 32;
-		of_property_read_u32(pdev->dev.of_node, "ngpios", &ngpios);
+		device_property_read_u32(&pdev->dev, "ngpios", &ngpios);
 		hg->gc.ngpio = ngpios;
 	}
 

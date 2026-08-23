@@ -2,14 +2,19 @@
 /*
  * Harbor Audio Controller driver (ALSA SoC / ASoC)
  *
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour.
+ *
  * Registers:
- *   0x00: CTRL       0x04: STATUS     0x08: CLK_CFG
- *   0x0C: FORMAT     0x10: TX_CTRL    0x14: RX_CTRL
- *   0x18: TX_DMA_ADDR 0x1C: TX_DMA_SIZE 0x20: TX_DMA_WR
- *   0x24: TX_DMA_RD  0x28: RX_DMA_ADDR 0x2C: RX_DMA_SIZE
- *   0x30: RX_DMA_WR  0x34: RX_DMA_RD  0x38: INT_STATUS
- *   0x3C: INT_ENABLE 0x40: VOLUME_L   0x44: VOLUME_R
- *   0x48: MUTE
+ *   0x00: CTRL        0x08: STATUS      0x10: CLK_CFG
+ *   0x18: FORMAT      0x20: TX_CTRL     0x28: RX_CTRL
+ *   0x30: TX_DMA_ADDR 0x38: TX_DMA_SIZE 0x40: TX_DMA_WR
+ *   0x48: TX_DMA_RD   0x50: RX_DMA_ADDR 0x58: RX_DMA_SIZE
+ *   0x60: RX_DMA_WR   0x68: RX_DMA_RD   0x70: INT_STATUS
+ *   0x78: INT_ENABLE  0x80: VOLUME_L    0x88: VOLUME_R
+ *   0x90: MUTE
  */
 
 #include <linux/module.h>
@@ -22,18 +27,18 @@
 #include <sound/pcm_params.h>
 
 #define HARBOR_AUDIO_CTRL	 0x00
-#define HARBOR_AUDIO_STATUS	 0x04
-#define HARBOR_AUDIO_CLK_CFG	 0x08
-#define HARBOR_AUDIO_FORMAT	 0x0C
-#define HARBOR_AUDIO_TX_CTRL	 0x10
-#define HARBOR_AUDIO_RX_CTRL	 0x14
-#define HARBOR_AUDIO_TX_DMA_ADDR 0x18
-#define HARBOR_AUDIO_TX_DMA_SIZE 0x1C
-#define HARBOR_AUDIO_INT_STATUS	 0x38
-#define HARBOR_AUDIO_INT_ENABLE	 0x3C
-#define HARBOR_AUDIO_VOLUME_L	 0x40
-#define HARBOR_AUDIO_VOLUME_R	 0x44
-#define HARBOR_AUDIO_MUTE	 0x48
+#define HARBOR_AUDIO_STATUS	 0x08
+#define HARBOR_AUDIO_CLK_CFG	 0x10
+#define HARBOR_AUDIO_FORMAT	 0x18
+#define HARBOR_AUDIO_TX_CTRL	 0x20
+#define HARBOR_AUDIO_RX_CTRL	 0x28
+#define HARBOR_AUDIO_TX_DMA_ADDR 0x30
+#define HARBOR_AUDIO_TX_DMA_SIZE 0x38
+#define HARBOR_AUDIO_INT_STATUS	 0x70
+#define HARBOR_AUDIO_INT_ENABLE	 0x78
+#define HARBOR_AUDIO_VOLUME_L	 0x80
+#define HARBOR_AUDIO_VOLUME_R	 0x88
+#define HARBOR_AUDIO_MUTE	 0x90
 
 struct harbor_audio {
 	void __iomem *base;

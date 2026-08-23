@@ -13,15 +13,19 @@ import '../soc/svd.dart';
 /// capability. Each channel can operate as a free-running timer,
 /// one-shot timer, or PWM generator.
 ///
-/// Per-channel register map (base + ch*0x10):
+/// Each register sits in its own 64-bit-aligned slot, so a 32-bit access lands
+/// in the low word on both a 32-bit and a 64-bit fabric, and the byte-address
+/// decode needs no high/low-half selection.
+///
+/// Per-channel register map (0x20 + ch*0x20):
 /// - +0x00: CTRL    (enable, mode, irq_en, prescaler)
-/// - +0x04: COUNT   (current counter value)
-/// - +0x08: COMPARE (compare/period value)
-/// - +0x0C: DUTY    (PWM duty cycle value)
+/// - +0x08: COUNT   (current counter value)
+/// - +0x10: COMPARE (compare/period value)
+/// - +0x18: DUTY    (PWM duty cycle value)
 ///
 /// Global registers:
 /// - 0x00: GLOBAL_CTRL (global enable)
-/// - 0x04: INT_STATUS  (per-channel interrupt status, W1C)
+/// - 0x08: INT_STATUS  (per-channel interrupt status, W1C)
 class HarborPwmTimer extends BridgeModule
     with
         HarborDeviceTreeNodeProvider,
@@ -52,6 +56,14 @@ class HarborPwmTimer extends BridgeModule
     BusProtocol protocol = BusProtocol.wishbone,
     String? name,
   }) : super('HarborPwmTimer', name: name ?? 'pwm_timer') {
+    // Channel ch decodes at 0x20 + ch*0x20 inside the 4 KiB register window, so
+    // channel 127 would wrap past the window and alias the global block.
+    if (channels > 127) {
+      throw ArgumentError(
+        'HarborPwmTimer: at most 127 channels fit the 4 KiB register window '
+        '(got $channels).',
+      );
+    }
     createPort('clk', PortDirection.input);
     createPort('reset', PortDirection.input);
     addOutput('interrupt');
@@ -62,7 +74,7 @@ class HarborPwmTimer extends BridgeModule
       module: this,
       name: 'bus',
       protocol: protocol,
-      addressWidth: 8,
+      addressWidth: 12,
       dataWidth: 32,
     );
 
@@ -177,34 +189,43 @@ class HarborPwmTimer extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              // Global registers
-              Case(bus.addr.getRange(0, 2), [
-                CaseItem(Const(0, width: 2), [
-                  If(
-                    bus.we,
-                    then: [globalEnable < bus.dataIn[0]],
-                    orElse: [bus.dataOut < globalEnable.zeroExtend(32)],
-                  ),
-                ]),
-                CaseItem(Const(1, width: 2), [
-                  If(
-                    bus.we,
-                    then: [
-                      intStatus <
-                          (intStatus & ~bus.dataIn.getRange(0, channels)),
-                    ],
-                    orElse: [bus.dataOut < intStatus.zeroExtend(32)],
-                  ),
-                ]),
-              ]),
+              // Global registers (the first 0x20 bytes only: without this
+              // guard a channel access at 0x20 + n decoded as a global one too,
+              // because the low bits match).
+              If(
+                bus.addr.getRange(5, 12).eq(Const(0, width: 7)),
+                then: [
+                  Case(bus.addr.getRange(0, 5), [
+                    CaseItem(Const(0x00, width: 5), [
+                      If(
+                        bus.we,
+                        then: [globalEnable < bus.dataIn[0]],
+                        orElse: [bus.dataOut < globalEnable.zeroExtend(32)],
+                      ),
+                    ]),
+                    CaseItem(Const(0x08, width: 5), [
+                      If(
+                        bus.we,
+                        then: [
+                          intStatus <
+                              (intStatus & ~bus.dataIn.getRange(0, channels)),
+                        ],
+                        orElse: [bus.dataOut < intStatus.zeroExtend(32)],
+                      ),
+                    ]),
+                  ]),
+                ],
+              ),
 
-              // Per-channel registers (0x10 + ch*0x10)
+              // Per-channel registers (0x20 + ch*0x20). The stride is 0x20, not
+              // 0x10: four 8-byte slots no longer fit in 16 bytes, and a 0x10
+              // stride put DUTY on the next channel's CTRL.
               for (var ch = 0; ch < channels; ch++)
                 If(
-                  bus.addr.getRange(4, 8).eq(Const(1 + ch, width: 4)),
+                  bus.addr.getRange(5, 12).eq(Const(1 + ch, width: 7)),
                   then: [
-                    Case(bus.addr.getRange(0, 2), [
-                      CaseItem(Const(0, width: 2), [
+                    Case(bus.addr.getRange(0, 5), [
+                      CaseItem(Const(0x00, width: 5), [
                         If(
                           bus.we,
                           then: [
@@ -225,7 +246,7 @@ class HarborPwmTimer extends BridgeModule
                           ],
                         ),
                       ]),
-                      CaseItem(Const(1, width: 2), [
+                      CaseItem(Const(0x08, width: 5), [
                         If(
                           bus.we,
                           then: [
@@ -234,7 +255,7 @@ class HarborPwmTimer extends BridgeModule
                           orElse: [bus.dataOut < chCount[ch].zeroExtend(32)],
                         ),
                       ]),
-                      CaseItem(Const(2, width: 2), [
+                      CaseItem(Const(0x10, width: 5), [
                         If(
                           bus.we,
                           then: [
@@ -244,7 +265,7 @@ class HarborPwmTimer extends BridgeModule
                           orElse: [bus.dataOut < chCompare[ch].zeroExtend(32)],
                         ),
                       ]),
-                      CaseItem(Const(3, width: 2), [
+                      CaseItem(Const(0x18, width: 5), [
                         If(
                           bus.we,
                           then: [

@@ -4,24 +4,53 @@ import 'package:rohd/rohd.dart';
 /// (ACK-only, [busDataWidth]-bit, e.g. 32) and the [Ddr3Controller]'s wide,
 /// pipelined interface (one word = one BL8 burst, e.g. 128-bit, with a stall).
 ///
-/// One outstanding transaction at a time (the SoC cache/CDC drives a single B4
-/// transaction to completion), which matches the controller's proven
-/// non-pipelined access pattern:
-///  - WRITE: a narrow write becomes ONE wide write whose byte-enables (`sel`)
-///    select just the addressed narrow word within the burst; DDR3 DM masks the
-///    rest, so no read-modify-write is needed. Writes are posted: the adapter
-///    ACKs the bus as soon as the controller accepts the command (`~stall`).
-///  - READ: a narrow read issues ONE wide burst read, waits for the controller's
-///    read ACK, then muxes out the addressed narrow word.
+/// Bus `adr` is a byte address. The burst address is `adr >> log2(ddrSelWidth)`
+/// and the word-in-burst is the bits between the two byte offsets.
 ///
-/// Bus `adr` is a narrow-word address (increments per [busDataWidth] word); the
-/// burst address is `adr >> log2(ratio)` and the word-in-burst is the low bits.
+/// ## Writes
+///
+/// Writes are posted: the adapter ACKs the bus as soon as the command is safe,
+/// and it does not wait for DRAM. Two mechanisms keep the command rate up.
+///
+///  - The adapter accepts a new bus request immediately after it releases the
+///    previous write to the controller. The controller ABORTS an in-flight
+///    request when `cyc` drops, so `cyc` stays asserted for
+///    [writeDrainCycles] more cycles after the last write. A following write
+///    arrives well inside that window, so a stream of writes holds `cyc`
+///    continuously and pays the drain only once, at the end.
+///  - With [writeCombine], the adapter holds ONE dirty burst. A write whose
+///    burst address matches the held burst is merged into it and ACKed with no
+///    DRAM command at all, so four sequential narrow words become one BL8
+///    burst. A write to a different burst flushes the held burst first. The
+///    byte-enables accumulate, so DDR3 DM still masks the untouched bytes and
+///    no read-modify-write is needed.
+///
+/// The held burst is flushed when: a write addresses a different burst, a read
+/// addresses the SAME burst (the read hazard), or the bus is idle for
+/// [flushIdleCycles]. The idle flush is what lands the tail of a transfer.
+///
+/// ## Reads
+///
+/// A narrow read issues ONE wide burst read, waits for the controller's read
+/// ACK, then muxes out the addressed narrow word. Reads are strictly ordered
+/// against the held burst by the flush above. One read is outstanding at a
+/// time.
 class Ddr3BurstAdapter extends Module {
   final int busDataWidth;
   final int ddrDataWidth;
   final int busAddrWidth;
   final int ddrAddrWidth;
   final int auxWidth;
+
+  /// Merge sequential narrow writes into one wide burst before issuing them.
+  final bool writeCombine;
+
+  /// Cycles to hold `cyc` after a write is accepted, so the controller does not
+  /// abort it. A following write re-arms this, so a stream pays it only once.
+  final int writeDrainCycles;
+
+  /// Idle cycles before a held dirty burst is flushed to DRAM.
+  final int flushIdleCycles;
 
   /// Narrow words per burst (e.g. 128/32 = 4).
   int get ratio => ddrDataWidth ~/ busDataWidth;
@@ -35,6 +64,9 @@ class Ddr3BurstAdapter extends Module {
     this.busDataWidth = 32,
     this.ddrDataWidth = 128,
     this.auxWidth = 4,
+    this.writeCombine = true,
+    this.writeDrainCycles = 31,
+    this.flushIdleCycles = 64,
     // --- narrow B4 slave side ---
     required Logic clk,
     required Logic reset,
@@ -51,6 +83,8 @@ class Ddr3BurstAdapter extends Module {
     super.name = 'ddr3_burst_adapter',
   }) {
     assert(ddrDataWidth % busDataWidth == 0, 'ratio must be integral');
+    assert(writeDrainCycles >= 1, 'writeDrainCycles must be at least 1');
+    assert(flushIdleCycles >= 1, 'flushIdleCycles must be at least 1');
     clk = addInput('clk', clk);
     reset = addInput('reset', reset);
     sCyc = addInput('s_cyc', sCyc);
@@ -75,17 +109,33 @@ class Ddr3BurstAdapter extends Module {
     final mSel = addOutput('m_sel', width: ddrSelWidth);
     final mAux = addOutput('m_aux', width: auxWidth);
 
-    // State: 0 IDLE, 1 ISSUE (hold cmd until accepted), 2 READ_WAIT (await ack).
-    final st = Logic(name: 'st', width: 2);
+    const stIdle = 0; // accept a request; hold cyc while draining
+    const stIssue =
+        1; // pass-through command (read, or write when not combining)
+    const stReadWait = 2; // await the controller read ack
+    const stFlush = 3; // flush the held burst to service a pending request
+    const stFlushIdle = 4; // flush the held burst after an idle timeout
+
+    final drainW = writeDrainCycles.bitLength;
+    final idleW = flushIdleCycles.bitLength;
+
+    final st = Logic(name: 'st', width: 3);
     final wordSel = Logic(name: 'word_sel', width: _ratioBits); // low addr bits
     final isWrite = Logic(name: 'is_write');
     final rdData = Logic(name: 'rd_data', width: busDataWidth);
     final ackReg = Logic(name: 'ack_reg');
-    // Write-drain counter: the controller ABORTS an in-flight request when cyc
-    // drops (o_wb_cyc gates s1/s2 pending). A posted write is not yet in the PHY
-    // pipeline when it is accepted, so cyc must stay asserted a few more cycles
-    // to let it drain, or the write is aborted before it reaches DRAM.
-    final drainCnt = Logic(name: 'wr_drain', width: 5);
+    // One command per request. ACK is a one-cycle pulse, so a master that keeps
+    // its request on the port past the ACK would otherwise be served again and
+    // the command would be issued twice. Released when the request drops.
+    final served = Logic(name: 'served');
+    final drainCnt = Logic(name: 'wr_drain', width: drainW);
+    final idleCnt = Logic(name: 'idle_cnt', width: idleW);
+
+    // The one held dirty burst (write combining).
+    final wbValid = Logic(name: 'wc_valid');
+    final wbAddr = Logic(name: 'wc_addr', width: ddrAddrWidth);
+    final wbData = Logic(name: 'wc_data', width: ddrDataWidth);
+    final wbSel = Logic(name: 'wc_sel', width: ddrSelWidth);
 
     // BYTE-addressed bus: addr[busByteBits-1:0] = byte-in-narrow-word (ignored),
     // addr[ddrByteBits-1:busByteBits] = which narrow word within the burst,
@@ -137,6 +187,21 @@ class Ddr3BurstAdapter extends Module {
       defaultValue: wide.getRange(0, busDataWidth),
       conditionalType: ConditionalType.unique,
     );
+    // One byte-enable bit becomes eight data-mask bits.
+    Logic expandSel(Logic sel) => [
+      for (var b = ddrSelWidth - 1; b >= 0; b--) sel[b].replicate(8),
+    ].swizzle();
+
+    // The held burst with the current narrow write merged into it. Bytes the
+    // new write does not select keep their held value.
+    final newSel = placedSel(curWord).named('wc_new_sel');
+    final newMask = expandSel(newSel).named('wc_new_mask');
+    final mergedData = ((wbData & ~newMask) | (placedData(curWord) & newMask))
+        .named('wc_merged_data');
+    final sameBurst = (wbValid & burstAddr.eq(wbAddr)).named('wc_same_burst');
+    final otherBurst = (wbValid & ~burstAddr.eq(wbAddr)).named(
+      'wc_other_burst',
+    );
 
     // Combinational wide-master + narrow-ack drive off the registered state.
     Combinational([
@@ -148,7 +213,7 @@ class Ddr3BurstAdapter extends Module {
       mSel < Const(0, width: ddrSelWidth),
       mAux < Const(1, width: auxWidth),
       If(
-        st.eq(1),
+        st.eq(stIssue),
         then: [
           mCyc < Const(1),
           mStb < Const(1),
@@ -158,8 +223,28 @@ class Ddr3BurstAdapter extends Module {
           mSel < mux(isWrite, placedSel(wordSel), Const(0, width: ddrSelWidth)),
         ],
       ),
-      If(st.eq(2), then: [mCyc < Const(1)]), // keep cyc while awaiting read ack
-      If(st.eq(3), then: [mCyc < Const(1)]), // keep cyc while the write drains
+      // Keep cyc while awaiting a read ack.
+      If(st.eq(stReadWait), then: [mCyc < Const(1)]),
+      if (writeCombine)
+        // Flush the held burst. The pending request is still on the slave port,
+        // so the command must come from the held registers, not from sAddr.
+        If(
+          st.eq(stFlush) | st.eq(stFlushIdle),
+          then: [
+            mCyc < Const(1),
+            mStb < Const(1),
+            mWe < Const(1),
+            mAddr < wbAddr,
+            mDataOut < wbData,
+            mSel < wbSel,
+          ],
+        ),
+      // Hold cyc through the post-write drain so the controller does not abort
+      // the last accepted write.
+      If(
+        st.eq(stIdle) & drainCnt.neq(Const(0, width: drainW)),
+        then: [mCyc < Const(1)],
+      ),
     ]);
     sAck <= ackReg;
     sDataOut <= rdData;
@@ -168,73 +253,175 @@ class Ddr3BurstAdapter extends Module {
       If(
         reset,
         then: [
-          st < Const(0, width: 2),
+          st < Const(stIdle, width: 3),
           wordSel < Const(0, width: _ratioBits),
           isWrite < Const(0),
           rdData < Const(0, width: busDataWidth),
           ackReg < Const(0),
-          drainCnt < Const(0, width: 5),
+          served < Const(0),
+          drainCnt < Const(0, width: drainW),
+          idleCnt < Const(0, width: idleW),
+          wbValid < Const(0),
+          wbAddr < Const(0, width: ddrAddrWidth),
+          wbData < Const(0, width: ddrDataWidth),
+          wbSel < Const(0, width: ddrSelWidth),
         ],
         orElse: [
           ackReg < Const(0), // single-cycle ack pulse by default
+          // Re-arm for the next request as soon as this one leaves the port.
+          If(~(sCyc & sStb), then: [served < Const(0)]),
           Case(
             st,
             [
-              CaseItem(Const(0, width: 2), [
-                // IDLE: latch a new bus request.
+              CaseItem(Const(stIdle, width: 3), [
                 If(
-                  sCyc & sStb,
+                  drainCnt.neq(Const(0, width: drainW)),
+                  then: [drainCnt < drainCnt - 1],
+                ),
+                If(
+                  sCyc & sStb & ~served,
                   then: [
-                    wordSel < curWord,
-                    isWrite < sWe,
-                    st < Const(1, width: 2),
+                    served < Const(1),
+                    idleCnt < Const(0, width: idleW),
+                    if (!writeCombine) ...[
+                      wordSel < curWord,
+                      isWrite < sWe,
+                      st < Const(stIssue, width: 3),
+                    ] else ...[
+                      If(
+                        sWe,
+                        then: [
+                          If(
+                            otherBurst,
+                            // Only one burst is held: make room first.
+                            then: [
+                              isWrite < Const(1),
+                              st < Const(stFlush, width: 3),
+                            ],
+                            // Merge into the held burst, or start a new one.
+                            // Either way no DRAM command is needed.
+                            orElse: [
+                              wbAddr < burstAddr,
+                              wbData <
+                                  mux(wbValid, mergedData, placedData(curWord)),
+                              wbSel < mux(wbValid, wbSel | newSel, newSel),
+                              wbValid < Const(1),
+                              ackReg < Const(1),
+                            ],
+                          ),
+                        ],
+                        orElse: [
+                          isWrite < Const(0),
+                          If(
+                            sameBurst,
+                            // Read hazard: the held burst has bytes this read
+                            // must see. Land it before the read is issued.
+                            then: [st < Const(stFlush, width: 3)],
+                            orElse: [
+                              wordSel < curWord,
+                              st < Const(stIssue, width: 3),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                  orElse: [
+                    if (writeCombine)
+                      If(
+                        wbValid,
+                        then: [
+                          If(
+                            idleCnt.gte(
+                              Const(flushIdleCycles - 1, width: idleW),
+                            ),
+                            then: [st < Const(stFlushIdle, width: 3)],
+                            orElse: [idleCnt < idleCnt + 1],
+                          ),
+                        ],
+                      ),
                   ],
                 ),
               ]),
-              CaseItem(Const(1, width: 2), [
-                // ISSUE: hold the wide command until the controller accepts it.
+              CaseItem(Const(stIssue, width: 3), [
+                // Hold the wide command until the controller accepts it.
                 If(
                   ~mStall,
                   then: [
                     If(
                       isWrite,
                       then: [
-                        // posted write: ack the bus on accept, then hold cyc to drain.
+                        // Posted write: ack on accept and take the next request
+                        // straight away. drainCnt keeps cyc up meanwhile.
                         ackReg < Const(1),
-                        drainCnt < Const(31, width: 5),
-                        st < Const(3, width: 2),
+                        drainCnt < Const(writeDrainCycles, width: drainW),
+                        st < Const(stIdle, width: 3),
                       ],
                       orElse: [
-                        st <
-                            Const(2, width: 2), // read issued -> await data ack
+                        st < Const(stReadWait, width: 3), // await data ack
                       ],
                     ),
                   ],
                 ),
               ]),
-              CaseItem(Const(2, width: 2), [
-                // READ_WAIT: capture the addressed word on the controller ack.
+              CaseItem(Const(stReadWait, width: 3), [
+                // Capture the addressed word on the controller ack.
                 If(
                   mAck,
                   then: [
                     rdData < pickWord(mData, wordSel),
                     ackReg < Const(1),
-                    st < Const(0, width: 2),
+                    st < Const(stIdle, width: 3),
                   ],
                 ),
               ]),
-              CaseItem(Const(3, width: 2), [
-                // WRITE_DRAIN: keep cyc asserted until the write has flushed to the
-                // PHY pipeline (else the controller aborts it on ~cyc).
-                If(
-                  drainCnt.eq(0),
-                  then: [st < Const(0, width: 2)],
-                  orElse: [drainCnt < drainCnt - 1],
-                ),
-              ]),
+              if (writeCombine) ...[
+                CaseItem(Const(stFlush, width: 3), [
+                  If(
+                    ~mStall,
+                    then: [
+                      drainCnt < Const(writeDrainCycles, width: drainW),
+                      idleCnt < Const(0, width: idleW),
+                      If(
+                        isWrite,
+                        // The buffer is free now: absorb the pending write into
+                        // it and ack, so the flush cost is one command per four
+                        // narrow words, not one per word.
+                        then: [
+                          wbAddr < burstAddr,
+                          wbData < placedData(curWord),
+                          wbSel < newSel,
+                          wbValid < Const(1),
+                          ackReg < Const(1),
+                          st < Const(stIdle, width: 3),
+                        ],
+                        // The pending read can go now that DRAM is current.
+                        orElse: [
+                          wbValid < Const(0),
+                          wbSel < Const(0, width: ddrSelWidth),
+                          wordSel < curWord,
+                          st < Const(stIssue, width: 3),
+                        ],
+                      ),
+                    ],
+                  ),
+                ]),
+                CaseItem(Const(stFlushIdle, width: 3), [
+                  If(
+                    ~mStall,
+                    then: [
+                      wbValid < Const(0),
+                      wbSel < Const(0, width: ddrSelWidth),
+                      drainCnt < Const(writeDrainCycles, width: drainW),
+                      idleCnt < Const(0, width: idleW),
+                      st < Const(stIdle, width: 3),
+                    ],
+                  ),
+                ]),
+              ],
             ],
             conditionalType: ConditionalType.unique,
-            defaultItem: [],
+            defaultItem: [st < Const(stIdle, width: 3)],
           ),
         ],
       ),

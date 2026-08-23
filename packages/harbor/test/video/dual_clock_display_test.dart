@@ -36,6 +36,7 @@ void main() {
     final mAck = Logic(name: 'm_ack');
 
     final disp = HarborDualClockDisplay(
+      target: const HarborSimTarget(),
       timing: timing,
       pixelClk: pixelClk,
       pixelReset: pixelReset,

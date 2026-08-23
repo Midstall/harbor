@@ -245,4 +245,115 @@ void main() {
     expect(mB.output('rdata').value.toInt(), equals(0xBBBB2222));
     await Simulator.endSimulation();
   });
+
+  test('pipelined single-master fabric round-trips a write+read', () async {
+    const cfg = WishboneConfig(addressWidth: 32, dataWidth: 32);
+    final soc = HarborSoC(
+      name: 'PipeSingleSoC',
+      compatible: 'test,pipe1',
+      busConfig: cfg,
+    );
+    final m = _RwMaster(cfg, 0x30, 0xC0DECAFE, name: 'm');
+    soc.addMaster(m, busInterfaceName: 'bus');
+    soc.addPeripheral(
+      HarborSram(baseAddress: 0, size: 4096, busAddressWidth: 32),
+    );
+    soc.buildFabric(pipeline: true);
+
+    final clk = SimpleClockGenerator(10).clk;
+    final resetL = Logic(name: 'reset')..inject(1);
+    final start = Logic(name: 'start')..inject(0);
+    soc.input('clk').srcConnection! <= clk;
+    soc.input('reset').srcConnection! <= resetL;
+    m.input('start').srcConnection! <= start;
+
+    await soc.build();
+    // The register slice must actually be in the netlist.
+    expect(soc.generateSynth(), contains('WishboneRegisterStage'));
+
+    Simulator.setMaxSimTime(2000000);
+    unawaited(Simulator.run());
+    await clk.nextPosedge;
+    await clk.nextPosedge;
+    resetL.inject(0);
+    await clk.nextPosedge;
+    start.inject(1);
+    await clk.nextPosedge;
+    start.inject(0);
+
+    var guard = 0;
+    while (guard++ < 500) {
+      await clk.nextPosedge;
+      if (m.output('done').value.toBool()) break;
+    }
+    expect(
+      m.output('done').value.toBool(),
+      isTrue,
+      reason: 'completed through the register slice',
+    );
+    expect(m.output('rdata').value.toInt(), equals(0xC0DECAFE));
+    await Simulator.endSimulation();
+  });
+
+  test('pipelined two-master fabric: both contend and complete', () async {
+    const cfg = WishboneConfig(addressWidth: 32, dataWidth: 32);
+    final soc = HarborSoC(
+      name: 'PipeContendSoC',
+      compatible: 'test,pipe2',
+      busConfig: cfg,
+    );
+    final mA = _RwMaster(cfg, 0x20, 0xAAAA1111, name: 'm_a');
+    final mB = _RwMaster(cfg, 0x40, 0xBBBB2222, name: 'm_b');
+    soc.addMaster(mA, busInterfaceName: 'bus');
+    soc.addMaster(mB, busInterfaceName: 'bus');
+    soc.addPeripheral(
+      HarborSram(baseAddress: 0, size: 4096, busAddressWidth: 32),
+    );
+    soc.buildFabric(pipeline: true);
+
+    final clk = SimpleClockGenerator(10).clk;
+    final resetL = Logic(name: 'reset')..inject(1);
+    final startA = Logic(name: 'startA')..inject(0);
+    final startB = Logic(name: 'startB')..inject(0);
+    soc.input('clk').srcConnection! <= clk;
+    soc.input('reset').srcConnection! <= resetL;
+    mA.input('start').srcConnection! <= startA;
+    mB.input('start').srcConnection! <= startB;
+
+    await soc.build();
+
+    Simulator.setMaxSimTime(2000000);
+    unawaited(Simulator.run());
+    await clk.nextPosedge;
+    await clk.nextPosedge;
+    resetL.inject(0);
+    await clk.nextPosedge;
+    startA.inject(1);
+    startB.inject(1);
+    await clk.nextPosedge;
+    startA.inject(0);
+    startB.inject(0);
+
+    var guard = 0;
+    while (guard++ < 500) {
+      await clk.nextPosedge;
+      if (mA.output('done').value.toBool() &&
+          mB.output('done').value.toBool()) {
+        break;
+      }
+    }
+    expect(
+      mA.output('done').value.toBool(),
+      isTrue,
+      reason: 'A done (pipelined)',
+    );
+    expect(
+      mB.output('done').value.toBool(),
+      isTrue,
+      reason: 'B done (pipelined)',
+    );
+    expect(mA.output('rdata').value.toInt(), equals(0xAAAA1111));
+    expect(mB.output('rdata').value.toInt(), equals(0xBBBB2222));
+    await Simulator.endSimulation();
+  });
 }

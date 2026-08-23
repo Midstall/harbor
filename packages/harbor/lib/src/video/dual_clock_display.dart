@@ -1,5 +1,8 @@
 import 'package:rohd/rohd.dart';
 
+import '../soc/target.dart';
+import 'tmds_serializer.dart';
+
 import '../peripherals/display.dart';
 import 'display_output.dart';
 import 'dual_clock_scanout.dart';
@@ -16,6 +19,10 @@ import 'video_timing.dart';
 /// single-clock variant used by the test-pattern path.
 class HarborDualClockDisplay extends Module {
   Logic get gpdi => output('gpdi');
+
+  /// The four complement lanes, present only on a target that drives its own
+  /// ([TmdsSerializer.needsComplement]).
+  Logic get gpdiN => output('gpdi_n');
   Logic get de => output('de');
   Logic get hsync => output('hsync');
   Logic get vsync => output('vsync');
@@ -51,6 +58,7 @@ class HarborDualClockDisplay extends Module {
     required Logic mDataIn,
     required Logic mAck,
     this.outputType = HarborDisplayInterface.hdmi,
+    required HarborDeviceTarget target,
     super.name = 'dual_clock_display',
   }) : super(definitionName: 'HarborDualClockDisplay') {
     requireDisplayOutputSupported(outputType);
@@ -69,6 +77,10 @@ class HarborDualClockDisplay extends Module {
     final hbits = (timing.hTotal - 1).bitLength;
     final vbits = (timing.vTotal - 1).bitLength;
     addOutput('gpdi', width: 4);
+    final tmdsComplement = TmdsSerializer.needsComplement(target);
+    if (tmdsComplement) {
+      addOutput('gpdi_n', width: 4);
+    }
     addOutput('de');
     addOutput('hsync');
     addOutput('vsync');
@@ -98,7 +110,15 @@ class HarborDualClockDisplay extends Module {
     y <= ty;
 
     final frameStart = enable & tx.eq(0) & ty.eq(timing.vActive);
-    final lineStart = enable & tx.eq(timing.hActive) & ty.lt(timing.vActive);
+    // End of an active line: swap to the prefetched buffer and start the next
+    // line's fetch. NOT after the LAST active line: there is no next line, and
+    // that pointless fetch is still running when the frame ends, so the
+    // scanout's frame-start prime (which issues line 0) lands while the system
+    // side is busy and is dropped. The visible result is a blank first row,
+    // and only on wide lines, because a short line's fetch finishes inside the
+    // horizontal blank and never overlaps.
+    final lineStart =
+        enable & tx.eq(timing.hActive) & ty.lt(timing.vActive - 1);
 
     final scanout = HarborDualClockScanout(
       pixelClk: pixelClk,
@@ -138,6 +158,7 @@ class HarborDualClockDisplay extends Module {
     vsync <= timingGen.vsync;
 
     final transmitter = DviTransmitter(
+      target: target,
       pixelClk: pixelClk,
       shiftClk: shiftClk, // 5x pixel clock from the SoC's display PLL
       pixelReset: pixelReset,
@@ -150,5 +171,8 @@ class HarborDualClockDisplay extends Module {
       blue: b,
     );
     gpdi <= transmitter.gpdi;
+    if (tmdsComplement) {
+      gpdiN <= transmitter.gpdiN;
+    }
   }
 }

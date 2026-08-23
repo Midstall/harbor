@@ -2,32 +2,38 @@
 /*
  * Harbor DMA controller driver
  *
- * Per-channel registers (base + ch*0x20):
- *   +0x00: CH_CTRL   +0x04: CH_STATUS  +0x08: CH_SRC
- *   +0x0C: CH_DST    +0x10: CH_LEN
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour. A block is 8 slots (0x40).
+ *
+ * Per-channel registers (0x40 + ch*0x40):
+ *   +0x00: CH_CTRL   +0x08: CH_STATUS  +0x10: CH_SRC
+ *   +0x18: CH_DST    +0x20: CH_LEN
  *
  * Global registers:
- *   0x000: CTRL      0x004: INT_STATUS  0x008: INT_ENABLE
+ *   0x00: CTRL       0x08: INT_STATUS   0x10: INT_ENABLE
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/dmaengine.h>
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/interrupt.h>
 
 #define HARBOR_DMA_CTRL	      0x000
-#define HARBOR_DMA_INT_STATUS 0x004
-#define HARBOR_DMA_INT_ENABLE 0x008
-#define HARBOR_DMA_CH_BASE    0x100
-#define HARBOR_DMA_CH_STRIDE  0x20
+#define HARBOR_DMA_INT_STATUS 0x008
+#define HARBOR_DMA_INT_ENABLE 0x010
+#define HARBOR_DMA_CH_BASE    0x40
+#define HARBOR_DMA_CH_STRIDE  0x40
 
 #define HARBOR_DMA_CH_CTRL   0x00
-#define HARBOR_DMA_CH_STATUS 0x04
-#define HARBOR_DMA_CH_SRC    0x08
-#define HARBOR_DMA_CH_DST    0x0C
-#define HARBOR_DMA_CH_LEN    0x10
+#define HARBOR_DMA_CH_STATUS 0x08
+#define HARBOR_DMA_CH_SRC    0x10
+#define HARBOR_DMA_CH_DST    0x18
+#define HARBOR_DMA_CH_LEN    0x20
 
 struct harbor_dma {
 	void __iomem *base;
@@ -49,7 +55,7 @@ static int harbor_dma_probe(struct platform_device *pdev)
 	if (IS_ERR(hd->base))
 		return PTR_ERR(hd->base);
 
-	of_property_read_u32(pdev->dev.of_node, "dma-channels", &num_channels);
+	device_property_read_u32(&pdev->dev, "dma-channels", &num_channels);
 	hd->num_channels = num_channels;
 
 	/* Enable controller */

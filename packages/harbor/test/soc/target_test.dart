@@ -100,6 +100,34 @@ void main() {
       expect(result, isNotEmpty);
     });
 
+    test('knownPorts filters board pins the design does not expose', () {
+      // A board carries an unused HDMI header, but this SoC has no gpdi port.
+      const target = HarborFpgaTarget.spartan7(
+        device: 'xc7s50',
+        package: 'csga324',
+        useOpenXc7: true,
+        pinMap: {
+          'clk': 'R2',
+          'uart_tx': 'R12',
+          'sdram_dq[0]': 'K2',
+          'gpdi_dp[0]': 'N15',
+        },
+      );
+      // Without knownPorts every pin is emitted (backward compatible).
+      final all = target.generateConstraints();
+      expect(all, contains('gpdi_dp[0]'));
+
+      // With knownPorts, gpdi is dropped (no gpdi port), but the real ports,
+      // including the sdram_dq bus bit whose base name is exposed, are kept.
+      final filtered = target.generateConstraints(
+        knownPorts: {'clk', 'uart_tx', 'sdram_dq'},
+      );
+      expect(filtered, contains('get_ports clk'));
+      expect(filtered, contains('get_ports uart_tx'));
+      expect(filtered, contains('get_ports sdram_dq[0]'));
+      expect(filtered, isNot(contains('gpdi')));
+    });
+
     test('generateYosysTcl contains synth target', () {
       const target = HarborFpgaTarget.ice40(device: 'up5k', package: 'sg48');
       final result = target.generateYosysTcl('TopCell');

@@ -132,7 +132,9 @@ class HarborPcieConfig with HarborPrettyString {
 /// - MSI/MSI-X interrupt handling
 /// - LTSSM link training state machine
 ///
-/// Register map:
+/// Register map (each register in its own 64-bit-aligned slot, so a 32-bit
+/// access lands in the low word on both a 32-bit and a 64-bit fabric, and the
+/// byte-address decode needs no high/low-half selection):
 /// - 0x000: CTRL       (enable, gen, lanes, role)
 /// - 0x004: STATUS     (link_up, negotiated gen/lanes, ltssm_state)
 /// - 0x008: LINK_CTRL  (link training, speed change, retrain)
@@ -639,9 +641,9 @@ class HarborPcieController extends BridgeModule
             then: [
               bus.ack < Const(1),
 
-              Case(bus.addr.getRange(0, 6), [
+              Case(bus.addr.getRange(0, 8), [
                 // 0x000: CTRL
-                CaseItem(Const(0x00, width: 6), [
+                CaseItem(Const(0x00, width: 8), [
                   If(
                     bus.we,
                     then: [enable < bus.dataIn[0]],
@@ -649,7 +651,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x004: STATUS (link_up, neg gen/lanes, ltssm state)
-                CaseItem(Const(0x01, width: 6), [
+                CaseItem(Const(0x08, width: 8), [
                   bus.dataOut <
                       linkUp.zeroExtend(32) |
                           (negGen.zeroExtend(32) << Const(4, width: 32)) |
@@ -657,7 +659,7 @@ class HarborPcieController extends BridgeModule
                           (ltssm.zeroExtend(32) << Const(16, width: 32)),
                 ]),
                 // 0x008: LINK_CTRL ([0] retrain, [1] link disable)
-                CaseItem(Const(0x02, width: 6), [
+                CaseItem(Const(0x10, width: 8), [
                   If(
                     bus.we,
                     then: [
@@ -671,7 +673,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x00C: INT_STATUS (W1C)
-                CaseItem(Const(0x03, width: 6), [
+                CaseItem(Const(0x18, width: 8), [
                   If(
                     bus.we,
                     then: [
@@ -681,7 +683,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x010: INT_ENABLE
-                CaseItem(Const(0x04, width: 6), [
+                CaseItem(Const(0x20, width: 8), [
                   If(
                     bus.we,
                     then: [intEnable < bus.dataIn.getRange(0, 8)],
@@ -689,7 +691,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x014: ERR_STATUS
-                CaseItem(Const(0x05, width: 6), [
+                CaseItem(Const(0x28, width: 8), [
                   If(
                     bus.we,
                     then: [
@@ -699,7 +701,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x020: BAR0_BASE
-                CaseItem(Const(0x08, width: 6), [
+                CaseItem(Const(0x40, width: 8), [
                   If(
                     bus.we,
                     then: [bar0Base < bus.dataIn],
@@ -707,7 +709,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x024: BAR0_MASK
-                CaseItem(Const(0x09, width: 6), [
+                CaseItem(Const(0x48, width: 8), [
                   If(
                     bus.we,
                     then: [bar0Mask < bus.dataIn],
@@ -715,7 +717,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x028: BAR1_BASE
-                CaseItem(Const(0x0A, width: 6), [
+                CaseItem(Const(0x50, width: 8), [
                   If(
                     bus.we,
                     then: [bar1Base < bus.dataIn],
@@ -723,7 +725,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x02C: BAR1_MASK
-                CaseItem(Const(0x0B, width: 6), [
+                CaseItem(Const(0x58, width: 8), [
                   If(
                     bus.we,
                     then: [bar1Mask < bus.dataIn],
@@ -731,7 +733,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x040: MSI_ADDR
-                CaseItem(Const(0x10, width: 6), [
+                CaseItem(Const(0x80, width: 8), [
                   If(
                     bus.we,
                     then: [msiAddr < bus.dataIn],
@@ -739,7 +741,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x044: MSI_DATA
-                CaseItem(Const(0x11, width: 6), [
+                CaseItem(Const(0x88, width: 8), [
                   If(
                     bus.we,
                     then: [msiData < bus.dataIn.getRange(0, 16)],
@@ -747,7 +749,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x048: MSI_MASK
-                CaseItem(Const(0x12, width: 6), [
+                CaseItem(Const(0x90, width: 8), [
                   If(
                     bus.we,
                     then: [msiMask < bus.dataIn],
@@ -755,9 +757,9 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x04C: MSI_PEND
-                CaseItem(Const(0x13, width: 6), [bus.dataOut < msiPend]),
+                CaseItem(Const(0x98, width: 8), [bus.dataOut < msiPend]),
                 // 0x050: TLP_ADDR_LO (PCIe target address, low 32 bits)
-                CaseItem(Const(0x14, width: 6), [
+                CaseItem(Const(0xA0, width: 8), [
                   If(
                     bus.we,
                     then: [tlpAddrLo < bus.dataIn],
@@ -765,7 +767,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x054: TLP_ADDR_HI
-                CaseItem(Const(0x15, width: 6), [
+                CaseItem(Const(0xA8, width: 8), [
                   If(
                     bus.we,
                     then: [tlpAddrHi < bus.dataIn],
@@ -773,7 +775,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x058: TLP_LEN (DWords), a write resets the data pointers
-                CaseItem(Const(0x16, width: 6), [
+                CaseItem(Const(0xB0, width: 8), [
                   If(
                     bus.we,
                     then: [
@@ -785,7 +787,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x05C: TLP_CTRL ([0] start, [1] is-write) assembles and sends
-                CaseItem(Const(0x17, width: 6), [
+                CaseItem(Const(0xB8, width: 8), [
                   If(
                     bus.we & bus.dataIn[0],
                     then: [
@@ -820,7 +822,7 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x060: TLP_DATA (write fills the buffer, read drains it)
-                CaseItem(Const(0x18, width: 6), [
+                CaseItem(Const(0xC0, width: 8), [
                   If(
                     bus.we,
                     then: [
@@ -838,18 +840,18 @@ class HarborPcieController extends BridgeModule
                   ),
                 ]),
                 // 0x064: TLP_STATUS ([0] busy, [1] done, [15:8] tag)
-                CaseItem(Const(0x19, width: 6), [
+                CaseItem(Const(0xC8, width: 8), [
                   bus.dataOut <
                       tlpBusy.zeroExtend(32) |
                           (tlpDone.zeroExtend(32) << Const(1, width: 32)) |
                           (tlpTag.zeroExtend(32) << Const(8, width: 32)),
                 ]),
                 // 0x068/0x06C/0x070: assembled TLP header DWords (read-only)
-                CaseItem(Const(0x1A, width: 6), [bus.dataOut < hdr0]),
-                CaseItem(Const(0x1B, width: 6), [bus.dataOut < hdr1]),
-                CaseItem(Const(0x1C, width: 6), [bus.dataOut < hdr2]),
+                CaseItem(Const(0xD0, width: 8), [bus.dataOut < hdr0]),
+                CaseItem(Const(0xD8, width: 8), [bus.dataOut < hdr1]),
+                CaseItem(Const(0xE0, width: 8), [bus.dataOut < hdr2]),
                 // 0x074: MSI_TRIGGER (write a vector to emit an MSI mem write)
-                CaseItem(Const(0x1D, width: 6), [
+                CaseItem(Const(0xE8, width: 8), [
                   If(
                     bus.we,
                     then: [
@@ -894,7 +896,7 @@ class HarborPcieController extends BridgeModule
                     CaseItem(Const(0x00, width: 6), [
                       ecam.dataOut < Const(cfgVendorDevice, width: 32),
                     ]),
-                    // 0x04: command / status
+                    // 0x08: command / status
                     CaseItem(Const(0x01, width: 6), [
                       If(
                         ecam.we,
@@ -902,15 +904,15 @@ class HarborPcieController extends BridgeModule
                         orElse: [ecam.dataOut < cfgCommand.zeroExtend(32)],
                       ),
                     ]),
-                    // 0x08: class code / revision
+                    // 0x10: class code / revision
                     CaseItem(Const(0x02, width: 6), [
                       ecam.dataOut < Const(cfgClassRev, width: 32),
                     ]),
-                    // 0x0C: header type (0x01 = bridge)
+                    // 0x18: header type (0x01 = bridge)
                     CaseItem(Const(0x03, width: 6), [
                       ecam.dataOut < Const(cfgHeaderType, width: 32),
                     ]),
-                    // 0x10: BAR0 (shared with the controller BAR0 register)
+                    // 0x20: BAR0 (shared with the controller BAR0 register)
                     CaseItem(Const(0x04, width: 6), [
                       If(
                         ecam.we,
@@ -918,7 +920,7 @@ class HarborPcieController extends BridgeModule
                         orElse: [ecam.dataOut < bar0Base],
                       ),
                     ]),
-                    // 0x14: BAR1
+                    // 0x28: BAR1
                     CaseItem(Const(0x05, width: 6), [
                       If(
                         ecam.we,
@@ -926,7 +928,7 @@ class HarborPcieController extends BridgeModule
                         orElse: [ecam.dataOut < bar1Base],
                       ),
                     ]),
-                    // 0x18: primary/secondary/subordinate bus numbers
+                    // 0x30: primary/secondary/subordinate bus numbers
                     CaseItem(Const(0x06, width: 6), [
                       If(
                         ecam.we,
@@ -934,15 +936,15 @@ class HarborPcieController extends BridgeModule
                         orElse: [ecam.dataOut < cfgBusNumbers],
                       ),
                     ]),
-                    // 0x34: capabilities pointer
+                    // 0x68: capabilities pointer
                     CaseItem(Const(0x0D, width: 6), [
                       ecam.dataOut < Const(cfgCapPtr, width: 32),
                     ]),
-                    // 0x40: MSI capability header
+                    // 0x80: MSI capability header
                     CaseItem(Const(0x10, width: 6), [
                       ecam.dataOut < Const(cfgMsiCap, width: 32),
                     ]),
-                    // 0x44: MSI address (shared with MSI_ADDR register)
+                    // 0x88: MSI address (shared with MSI_ADDR register)
                     CaseItem(Const(0x11, width: 6), [
                       If(
                         ecam.we,
@@ -950,7 +952,7 @@ class HarborPcieController extends BridgeModule
                         orElse: [ecam.dataOut < msiAddr],
                       ),
                     ]),
-                    // 0x4C: MSI data (shared with MSI_DATA register)
+                    // 0x98: MSI data (shared with MSI_DATA register)
                     CaseItem(Const(0x13, width: 6), [
                       If(
                         ecam.we,

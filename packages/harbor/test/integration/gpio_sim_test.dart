@@ -20,9 +20,9 @@ void main() {
       final tb = PeripheralTestBench(gpio);
       await tb.init();
 
-      // Write OUTPUT register (word addr 1)
-      await tb.write(1, 0xA5);
-      final val = await tb.read(1);
+      // Write OUTPUT register (byte offset 0x08)
+      await tb.write(0x08, 0xA5);
+      final val = await tb.read(0x08);
       expect(val, equals(0xA5));
 
       await Simulator.endSimulation();
@@ -38,8 +38,8 @@ void main() {
       final tb = PeripheralTestBench(gpio);
       await tb.init();
 
-      // Read INPUT register (word addr 0)
-      final val = await tb.read(0);
+      // Read INPUT register (byte offset 0x00)
+      final val = await tb.read(0x00);
       expect(val, equals(0xCD));
 
       await Simulator.endSimulation();
@@ -55,9 +55,9 @@ void main() {
       final tb = PeripheralTestBench(gpio);
       await tb.init();
 
-      // Write DIR register (word addr 2)
-      await tb.write(2, 0xFF);
-      final val = await tb.read(2);
+      // Write DIR register (byte offset 0x10)
+      await tb.write(0x10, 0xFF);
+      final val = await tb.read(0x10);
       expect(val, equals(0xFF));
 
       await Simulator.endSimulation();
@@ -74,7 +74,7 @@ void main() {
       await tb.init();
 
       for (final value in [0x55, 0xAA, 0x00]) {
-        await tb.write(1, value);
+        await tb.write(0x08, value);
         await tb.waitCycles(2);
         expect(gpio.gpioOut.value.toInt(), equals(value));
       }
@@ -93,15 +93,15 @@ void main() {
       await tb.init();
 
       // Enable IRQ on pin 0, set edge-triggered
-      await tb.write(3, 0x01); // IRQ_EN
-      await tb.write(5, 0x01); // IRQ_EDGE = edge triggered
+      await tb.write(0x18, 0x01); // IRQ_EN
+      await tb.write(0x28, 0x01); // IRQ_EDGE = edge triggered
 
       // Rising edge on pin 0
       gpioIn.put(0x01);
       await tb.waitCycles(3);
 
-      // Read IRQ_STATUS (word addr 4)
-      final status = await tb.read(4);
+      // Read IRQ_STATUS (byte offset 0x20)
+      final status = await tb.read(0x20);
       expect(status & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -118,14 +118,14 @@ void main() {
       await tb.init();
 
       // Enable IRQ on pin 0, leave as level-triggered (default)
-      await tb.write(3, 0x01); // IRQ_EN
-      await tb.write(5, 0x00); // IRQ_EDGE = level
+      await tb.write(0x18, 0x01); // IRQ_EN
+      await tb.write(0x28, 0x00); // IRQ_EDGE = level
 
       // Drive pin 0 high
       gpioIn.put(0x01);
       await tb.waitCycles(3);
 
-      final status = await tb.read(4);
+      final status = await tb.read(0x20);
       expect(status & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -142,12 +142,12 @@ void main() {
       await tb.init();
 
       // Enable IRQ on pin 0, level-triggered
-      await tb.write(3, 0x01);
+      await tb.write(0x18, 0x01);
       gpioIn.put(0x01);
       await tb.waitCycles(3);
 
       // Confirm status set
-      var status = await tb.read(4);
+      var status = await tb.read(0x20);
       expect(status & 0x01, equals(0x01));
 
       // De-assert input so level doesn't re-fire
@@ -155,8 +155,8 @@ void main() {
       await tb.waitCycles(2);
 
       // Write 1 to clear bit 0
-      await tb.write(4, 0x01);
-      status = await tb.read(4);
+      await tb.write(0x20, 0x01);
+      status = await tb.read(0x20);
       expect(status & 0x01, equals(0x00));
 
       await Simulator.endSimulation();
@@ -173,8 +173,8 @@ void main() {
       await tb.init();
 
       // Set pins 0-3 output, 4-7 input
-      await tb.write(2, 0x0F);
-      final dir = await tb.read(2);
+      await tb.write(0x10, 0x0F);
+      final dir = await tb.read(0x10);
       expect(dir, equals(0x0F));
 
       await Simulator.endSimulation();
@@ -191,8 +191,8 @@ void main() {
       await tb.init();
 
       // Enable IRQ only on pin 1
-      await tb.write(3, 0x02);
-      final en = await tb.read(3);
+      await tb.write(0x18, 0x02);
+      final en = await tb.read(0x18);
       expect(en, equals(0x02));
 
       await Simulator.endSimulation();

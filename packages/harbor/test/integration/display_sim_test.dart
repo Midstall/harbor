@@ -25,9 +25,9 @@ void main() {
       final tb = PeripheralTestBench(display);
       await tb.init();
 
-      // H_ACTIVE word addr 4
-      await tb.write(4, 640);
-      final val = await tb.read(4);
+      // H_ACTIVE byte offset 0x20
+      await tb.write(0x20, 640);
+      final val = await tb.read(0x20);
       expect(val, equals(640));
 
       await Simulator.endSimulation();
@@ -48,9 +48,9 @@ void main() {
       final tb = PeripheralTestBench(display);
       await tb.init();
 
-      // V_ACTIVE word addr 6
-      await tb.write(6, 480);
-      final val = await tb.read(6);
+      // V_ACTIVE byte offset 0x30
+      await tb.write(0x30, 480);
+      final val = await tb.read(0x30);
       expect(val, equals(480));
 
       await Simulator.endSimulation();
@@ -71,9 +71,9 @@ void main() {
       final tb = PeripheralTestBench(display);
       await tb.init();
 
-      // CTRL word addr 0, bit 0 = enable
-      await tb.write(0, 0x01);
-      final val = await tb.read(0);
+      // CTRL byte offset 0x00, bit 0 = enable
+      await tb.write(0x00, 0x01);
+      final val = await tb.read(0x00);
       expect(val & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -94,9 +94,9 @@ void main() {
       final tb = PeripheralTestBench(display);
       await tb.init();
 
-      // FB_BASE word addr 2 (0x08 >> 2)
-      await tb.write(2, 0x40000000);
-      final val = await tb.read(2);
+      // FB_BASE byte offset 0x10
+      await tb.write(0x10, 0x40000000);
+      final val = await tb.read(0x10);
       expect(val, equals(0x40000000));
 
       await Simulator.endSimulation();
@@ -117,9 +117,9 @@ void main() {
       final tb = PeripheralTestBench(display);
       await tb.init();
 
-      // FB_STRIDE word addr 3 (0x0C >> 2)
-      await tb.write(3, 2560);
-      final val = await tb.read(3);
+      // FB_STRIDE byte offset 0x18
+      await tb.write(0x18, 2560);
+      final val = await tb.read(0x18);
       expect(val, equals(2560));
 
       await Simulator.endSimulation();
@@ -140,9 +140,9 @@ void main() {
       final tb = PeripheralTestBench(display);
       await tb.init();
 
-      // INT_ENABLE word addr 9 (0x24 >> 2)
-      await tb.write(9, 0x03);
-      final val = await tb.read(9);
+      // INT_ENABLE byte offset 0x48
+      await tb.write(0x48, 0x03);
+      final val = await tb.read(0x48);
       expect(val & 0x0F, equals(0x03));
 
       await Simulator.endSimulation();

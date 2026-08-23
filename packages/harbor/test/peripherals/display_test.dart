@@ -5,13 +5,13 @@ import 'package:rohd/rohd.dart';
 import 'package:test/test.dart';
 
 // Register word indices (the bus presents a word index).
-const _ctrl = 0;
-const _fbBase = 2;
-const _fbStride = 3;
-const _hActive = 4;
-const _hTiming = 5;
-const _vActive = 6;
-const _vTiming = 7;
+const _ctrl = 0x00;
+const _fbBase = 0x10;
+const _fbStride = 0x18;
+const _hActive = 0x20;
+const _hTiming = 0x28;
+const _vActive = 0x30;
+const _vTiming = 0x38;
 
 void main() {
   group('HarborDisplayTiming', () {

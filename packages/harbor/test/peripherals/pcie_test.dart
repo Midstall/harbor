@@ -5,23 +5,23 @@ import 'package:rohd/rohd.dart';
 import 'package:test/test.dart';
 
 // Register word indices (bus presents a word index).
-const _ctrl = 0;
-const _status = 1;
-const _linkCtrl = 2;
-const _intStatus = 3;
-const _intEnable = 4;
-const _msiAddr = 0x10;
-const _msiData = 0x11;
-const _msiPend = 0x13;
-const _tlpAddrLo = 0x14;
-const _tlpAddrHi = 0x15;
-const _tlpLen = 0x16;
-const _tlpCtrl = 0x17;
-const _tlpData = 0x18;
-const _tlpStatus = 0x19;
-const _tlpHdr0 = 0x1A;
-const _tlpHdr2 = 0x1C;
-const _msiTrigger = 0x1D;
+const _ctrl = 0x00;
+const _status = 0x08;
+const _linkCtrl = 0x10;
+const _intStatus = 0x18;
+const _intEnable = 0x20;
+const _msiAddr = 0x80;
+const _msiData = 0x88;
+const _msiPend = 0x98;
+const _tlpAddrLo = 0xA0;
+const _tlpAddrHi = 0xA8;
+const _tlpLen = 0xB0;
+const _tlpCtrl = 0xB8;
+const _tlpData = 0xC0;
+const _tlpStatus = 0xC8;
+const _tlpHdr0 = 0xD0;
+const _tlpHdr2 = 0xE0;
+const _msiTrigger = 0xE8;
 
 void main() {
   tearDown(() async {
@@ -366,9 +366,9 @@ void main() {
         await setUpDut();
         await ew(ecamAddr(0, 0, 0, 0x10), 0xC0000000); // BAR0 via config space
         expect(
-          await br(8),
+          await br(0x40),
           equals(0xC0000000),
-          reason: 'BAR0 shared with controller reg 0x020',
+          reason: 'BAR0 shared with controller reg 0x040',
         );
         await Simulator.endSimulation();
       },

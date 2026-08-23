@@ -85,6 +85,8 @@ class HarborSram extends BridgeModule
         ack,
         bus.sel,
       );
+    } else if (target case HarborSimTarget()) {
+      _buildSimArray(clk, wordAddr, datIn, datOut, stb, we, ack, bus.sel);
     } else if (target case HarborAsicTarget asicTarget) {
       _buildWithAsicSram(
         asicTarget,
@@ -164,11 +166,18 @@ class HarborSram extends BridgeModule
     final depthBlocks = (numWords + blockWordDepth - 1) ~/ blockWordDepth;
     final totalBlocks = widthBlocks * depthBlocks;
 
-    // Beyond a sane block budget, fall back to the inferred-memory model rather
-    // than carpeting the device in BRAM (mirrors the ECP5 path).
+    // Past a sane block budget this would carpet the device in BRAM, so refuse
+    // instead. Falling through to the generic model here would either build a
+    // memory of registers the part cannot hold, or (for a large one) fail with
+    // a message about passing a target, which is confusing when a target IS
+    // set and the real limit is the block budget.
     if (totalBlocks > 64) {
-      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords, sel);
-      return;
+      throw ArgumentError(
+        'HarborSram of $size bytes needs $totalBlocks RAMB36E1 blocks, past '
+        'the 64 this builder places. A Spartan-7 XC7S50 holds 75 blocks in '
+        'total, so this is near the whole device. Put a memory this big off '
+        'chip (a `dram` device) or make it smaller.',
+      );
     }
 
     final depthAddrBits = depthBlocks > 1 ? (depthBlocks - 1).bitLength : 0;
@@ -287,10 +296,16 @@ class HarborSram extends BridgeModule
     final depthBrams = (numWords + bramWordDepth - 1) ~/ bramWordDepth;
     final totalBrams = bytesPerWord * depthBrams;
 
-    // Limit: don't instantiate too many BRAMs
+    // Past a sane block budget this would carpet the device in BRAM, so refuse
+    // instead. See the Xilinx path for why this does not fall through to the
+    // generic model.
     if (totalBrams > 64) {
-      _buildSimModel(clk, wordAddr, datIn, datOut, stb, we, ack, numWords, sel);
-      return;
+      throw ArgumentError(
+        'HarborSram of $size bytes needs $totalBrams DP16KD blocks, past the '
+        '64 this builder places (a $dataWidth-bit memory reaches that at '
+        '${64 ~/ bytesPerWord * bramWordDepth * bytesPerWord} bytes). Put a '
+        'memory this big off chip (a `dram` device) or make it smaller.',
+      );
     }
 
     final depthAddrBits = depthBrams > 1 ? (depthBrams - 1).bitLength : 0;
@@ -530,6 +545,42 @@ class HarborSram extends BridgeModule
     ]);
   }
 
+  /// A behavioral memory array for a Verilator build.
+  ///
+  /// The generic model builds one register and one mux leg per word, which
+  /// stops scaling long before a framebuffer. A simulator does not need that:
+  /// a SystemVerilog array is exact, unlimited, and compiles in constant time.
+  /// The protocol matches the generic model exactly (ack one cycle after the
+  /// strobe, registered read data, per-lane write enables), so a design behaves
+  /// the same whichever path it takes.
+  void _buildSimArray(
+    Logic clk,
+    Logic wordAddr,
+    Logic datIn,
+    Logic datOut,
+    Logic stb,
+    Logic we,
+    Logic ack,
+    Logic sel,
+  ) {
+    final array = addSubModule(
+      HarborSramArray(
+        words: size ~/ (dataWidth ~/ 8),
+        dataWidth: dataWidth,
+        addrWidth: wordAddr.width,
+        name: '${name}_array',
+      ),
+    );
+    array.input('clk').srcConnection! <= clk;
+    array.input('addr').srcConnection! <= wordAddr;
+    array.input('din').srcConnection! <= datIn;
+    array.input('we').srcConnection! <= we;
+    array.input('stb').srcConnection! <= stb;
+    array.input('sel').srcConnection! <= sel;
+    datOut <= array.output('dout');
+    ack <= array.output('ack');
+  }
+
   void _buildSimModel(
     Logic clk,
     Logic wordAddr,
@@ -560,10 +611,25 @@ class HarborSram extends BridgeModule
       return bytes.rswizzle();
     }
 
-    // For simulation or small memories: Yosys will infer BRAM from
-    // this pattern during synthesis. Keep numWords reasonable.
-    final maxSimWords = 1024;
-    final effectiveWords = numWords > maxSimWords ? maxSimWords : numWords;
+    // For simulation or small memories: Yosys will infer BRAM from this
+    // pattern during synthesis. Each word costs a register plus a mux leg, so
+    // this path is only viable for a small memory.
+    //
+    // Refusing is deliberate. Quietly building a smaller memory than asked for
+    // makes every access above the cut vanish: writes are dropped, reads come
+    // back zero, and the device tree still advertises the full size, so the
+    // failure surfaces far from its cause (a framebuffer that renders only its
+    // first rows, a heap that corrupts past a boundary).
+    const maxSimWords = 1024;
+    if (numWords > maxSimWords) {
+      throw ArgumentError(
+        'HarborSram of $size bytes needs $numWords words, past the '
+        '$maxSimWords this generic model can build. Pass a `target` so it '
+        'uses that device\'s memory (FPGA block RAM, an ASIC macro, or the '
+        'behavioral array for a Verilator build), or make it smaller.',
+      );
+    }
+    final effectiveWords = numWords;
 
     final mem = <Logic>[
       for (var i = 0; i < effectiveWords; i++)
@@ -651,5 +717,81 @@ class _PdkSramMacro extends BridgeModule {
     createPort(dataOutPin, PortDirection.output, width: dataWidth);
     createPort(wePin, PortDirection.input);
     createPort(csPin, PortDirection.input);
+  }
+}
+
+/// The behavioral memory behind [HarborSram] under a Verilator target.
+///
+/// A leaf: it has no ROHD body, only the SystemVerilog one below, because a
+/// word-per-register array does not scale to the sizes a simulation wants to
+/// model. Sized modules get sized definition names, so two different memories
+/// cannot collide on one emitted file.
+class HarborSramArray extends BridgeModule with HarborSimLeaf {
+  /// Words of storage.
+  final int words;
+
+  /// Bits per word.
+  final int dataWidth;
+
+  /// Width of the word address port.
+  final int addrWidth;
+
+  HarborSramArray({
+    required this.words,
+    required this.dataWidth,
+    required this.addrWidth,
+    String? name,
+  }) : super(
+         'HarborSramArray_${words}x$dataWidth',
+         name: name ?? 'sram_array',
+         isSystemVerilogLeaf: true,
+       ) {
+    createPort('clk', PortDirection.input);
+    createPort('addr', PortDirection.input, width: addrWidth);
+    createPort('din', PortDirection.input, width: dataWidth);
+    createPort('we', PortDirection.input);
+    createPort('stb', PortDirection.input);
+    createPort('sel', PortDirection.input, width: dataWidth ~/ 8);
+    addOutput('dout', width: dataWidth);
+    addOutput('ack');
+  }
+
+  @override
+  String get simRtl {
+    final lanes = dataWidth ~/ 8;
+    return '''
+// Auto-generated behavioral SRAM for the Verilator build.
+// Single-cycle ack, registered read data, per-lane write enables: the same
+// protocol the generic ROHD model implements, at a size it cannot reach.
+module $definitionName (
+  input  logic clk,
+  input  logic [${addrWidth - 1}:0] addr,
+  input  logic [${dataWidth - 1}:0] din,
+  input  logic we,
+  input  logic stb,
+  input  logic [${lanes - 1}:0] sel,
+  output logic [${dataWidth - 1}:0] dout,
+  output logic ack
+);
+  logic [${dataWidth - 1}:0] mem [0:${words - 1}];
+  initial begin
+    for (int i = 0; i < $words; i++) mem[i] = '0;
+  end
+  always_ff @(posedge clk) begin
+    ack <= 1'b0;
+    dout <= '0;
+    if (stb && !ack) begin
+      ack <= 1'b1;
+      if (we) begin
+        for (int b = 0; b < $lanes; b++) begin
+          if (sel[b]) mem[addr][b*8 +: 8] <= din[b*8 +: 8];
+        end
+      end else begin
+        dout <= mem[addr];
+      end
+    end
+  end
+endmodule
+''';
   }
 }

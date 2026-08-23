@@ -5,19 +5,19 @@ import 'package:rohd/rohd.dart';
 import 'package:test/test.dart';
 
 // Register word indices (the bus presents a word index).
-const _intStatus = 4;
-const _intEnable = 5;
-const _txCtrl = 8; // 0x20 >> 2
-const _txDescBase = 10; // 0x28 >> 2
-const _txLen = 11; // 0x2C >> 2
-const _rxCtrl = 12; // 0x30 >> 2
-const _rxStatus = 13; // 0x34 >> 2
-const _rxDescBase = 14; // 0x38 >> 2
-const _mdioCtrl = 16; // 0x40 >> 2
-const _mdioData = 17; // 0x44 >> 2
-const _txData = 18; // 0x48 >> 2
-const _rxData = 19; // 0x4C >> 2
-const _rxLen = 20; // 0x50 >> 2
+const _intStatus = 0x20;
+const _intEnable = 0x28;
+const _txCtrl = 0x40;
+const _txDescBase = 0x50;
+const _txLen = 0x58;
+const _rxCtrl = 0x60;
+const _rxStatus = 0x68;
+const _rxDescBase = 0x70;
+const _mdioCtrl = 0x80;
+const _mdioData = 0x88;
+const _txData = 0x90;
+const _rxData = 0x98;
+const _rxLen = 0xA0;
 
 List<int> _bits(int v, int w) => [
   for (var i = w - 1; i >= 0; i--) (v >> i) & 1,

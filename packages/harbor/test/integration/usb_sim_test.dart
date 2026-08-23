@@ -21,9 +21,9 @@ void main() {
       final tb = PeripheralTestBench(usb);
       await tb.init();
 
-      // CTRL word addr 0, bit 0 = enable
-      await tb.write(0, 0x01);
-      final val = await tb.read(0);
+      // CTRL byte offset 0x00, bit 0 = enable
+      await tb.write(0x00, 0x01);
+      final val = await tb.read(0x00);
       expect(val & 0x01, equals(0x01));
 
       await Simulator.endSimulation();
@@ -40,9 +40,9 @@ void main() {
       final tb = PeripheralTestBench(usb);
       await tb.init();
 
-      // INT_ENABLE word addr 4 (0x010 >> 2)
-      await tb.write(4, 0xA5);
-      final val = await tb.read(4);
+      // INT_ENABLE byte offset 0x20
+      await tb.write(0x20, 0xA5);
+      final val = await tb.read(0x20);
       expect(val, equals(0xA5));
 
       await Simulator.endSimulation();
@@ -59,8 +59,8 @@ void main() {
       final tb = PeripheralTestBench(usb);
       await tb.init();
 
-      // STATUS word addr 1 (0x004 >> 2)
-      final val = await tb.read(1);
+      // STATUS byte offset 0x08
+      final val = await tb.read(0x08);
       // connected should be 0 after reset
       expect(val & 0x01, equals(0));
       // speed field at bits [7:4] should be maxSpeed index (full = 1)
@@ -80,9 +80,9 @@ void main() {
       final tb = PeripheralTestBench(usb);
       await tb.init();
 
-      // ADDR word addr 2 (0x008 >> 2)
-      await tb.write(2, 42);
-      final val = await tb.read(2);
+      // ADDR byte offset 0x10
+      await tb.write(0x10, 42);
+      final val = await tb.read(0x10);
       expect(val & 0x7F, equals(42));
 
       await Simulator.endSimulation();

@@ -48,12 +48,33 @@ class WishboneDecoder extends BridgeModule {
     for (var i = 0; i < mappings.length; i++) {
       final range = mappings[i].range;
       final s = slaveIntfs[i];
+      final aw = config.addressWidth;
+      final size = range.end - range.start;
 
-      final hitI =
-          (m.cyc &
-                  m.adr.gte(Const(range.start, width: config.addressWidth)) &
-                  m.adr.lt(Const(range.end, width: config.addressWidth)))
-              .named('hit_$i');
+      // A power-of-two region aligned to its own size decodes by matching the
+      // high address bits (one LUT compare), instead of the `>= base & < end`
+      // pair of carry-chain magnitude compares. This decode is the fabric's
+      // critical path, so the shorter form directly raises the clock ceiling.
+      // Any irregular region falls back to the general range compare.
+      final isPow2Aligned =
+          size > 0 &&
+          (size & (size - 1)) == 0 &&
+          (range.start & (size - 1)) == 0;
+      final Logic inRange;
+      if (isPow2Aligned && size.bitLength - 1 < aw) {
+        final low = size.bitLength - 1; // log2(size)
+        inRange = m.adr
+            .getRange(low)
+            .eq(Const(range.start >> low, width: aw - low));
+      } else if (isPow2Aligned) {
+        inRange = Const(1); // region spans the whole address space
+      } else {
+        inRange =
+            m.adr.gte(Const(range.start, width: aw)) &
+            m.adr.lt(Const(range.end, width: aw));
+      }
+
+      final hitI = (m.cyc & inRange).named('hit_$i');
       hitBits.add(hitI);
 
       s.cyc <= m.cyc & hitI;

@@ -2,28 +2,36 @@
 /*
  * Harbor I2C controller driver
  *
- * Register map:
+ * Each register sits in its own 8-byte slot: the controller sits on a
+ * byte-addressed fabric that decodes the low bits of the byte address, like
+ * every other Harbor peripheral. 4-byte spacing aliases every register onto its
+ * neighbour.
+ *
  *   0x00: CTRL     (RW) - enable, interrupt enable
- *   0x04: STATUS   (RW) - busy, ack, arb_lost, rx_ready, cmd_done
- *   0x08: DATA     (RW) - write=TX, read=RX
- *   0x0C: ADDR     (RW) - slave address
- *   0x10: PRESCALE (RW) - clock prescaler
- *   0x14: CMD      (WO) - start/stop/read/write triggers
+ *   0x08: STATUS   (RW) - busy, ack, arb_lost, rx_ready, cmd_done
+ *   0x10: DATA     (RW) - write=TX, read=RX
+ *   0x18: ADDR     (RW) - own address, slave mode only
+ *   0x20: PRESCALE (RW) - clock prescaler
+ *   0x28: CMD      (WO) - start/stop/read/write triggers
+ *
+ * The slave address rides DATA as the first byte of the frame
+ * (address << 1 | read), which is what the shift engine sends.
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/i2c.h>
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/clk.h>
 
 #define HARBOR_I2C_CTRL	    0x00
-#define HARBOR_I2C_STATUS   0x04
-#define HARBOR_I2C_DATA	    0x08
-#define HARBOR_I2C_ADDR	    0x0C
-#define HARBOR_I2C_PRESCALE 0x10
-#define HARBOR_I2C_CMD	    0x14
+#define HARBOR_I2C_STATUS   0x08
+#define HARBOR_I2C_DATA	    0x10
+#define HARBOR_I2C_ADDR	    0x18
+#define HARBOR_I2C_PRESCALE 0x20
+#define HARBOR_I2C_CMD	    0x28
 
 #define HARBOR_I2C_CTRL_ENABLE BIT(0)
 #define HARBOR_I2C_CTRL_IRQ_EN BIT(1)
@@ -142,17 +150,34 @@ static int harbor_i2c_probe(struct platform_device *pdev)
 	if (IS_ERR(hi->base))
 		return PTR_ERR(hi->base);
 
+	/*
+	 * The controller input clock. Harbor's device tree states it directly in
+	 * `harbor,input-clock-hz`, and NOT in `clock-frequency`: on an I2C node
+	 * the standard binding gives `clock-frequency` the SCL bus rate, which is
+	 * read separately below. Fall back to a `clocks` phandle.
+	 */
 	clk = devm_clk_get_optional_enabled(&pdev->dev, NULL);
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
-	hi->freq = clk ? clk_get_rate(clk) : 0;
+	if (device_property_read_u32(&pdev->dev, "harbor,input-clock-hz",
+				     &hi->freq))
+		hi->freq = clk ? clk_get_rate(clk) : 0;
 
-	of_property_read_u32(pdev->dev.of_node, "clock-frequency", &bus_freq);
+	device_property_read_u32(&pdev->dev, "clock-frequency", &bus_freq);
 
-	/* Set prescaler */
-	if (hi->freq && bus_freq)
+	/*
+	 * Prescale = input / (5 * SCL) - 1. Skip it when the input clock is too
+	 * slow for the requested bus rate, rather than underflowing to a huge
+	 * divider that would stall SCL.
+	 */
+	if (hi->freq && bus_freq && hi->freq >= 5 * bus_freq)
 		writel(hi->freq / (5 * bus_freq) - 1,
 		       hi->base + HARBOR_I2C_PRESCALE);
+	else if (hi->freq && bus_freq)
+		dev_warn(&pdev->dev,
+			 "input clock %u Hz too slow for %u Hz SCL, keeping "
+			 "the reset prescale\n",
+			 hi->freq, bus_freq);
 
 	/* Enable controller */
 	writel(HARBOR_I2C_CTRL_ENABLE, hi->base + HARBOR_I2C_CTRL);
@@ -160,7 +185,8 @@ static int harbor_i2c_probe(struct platform_device *pdev)
 	hi->adap.owner = THIS_MODULE;
 	hi->adap.algo = &harbor_i2c_algo;
 	hi->adap.dev.parent = &pdev->dev;
-	hi->adap.dev.of_node = pdev->dev.of_node;
+	/* Child enumeration follows this node, DT or ACPI alike. */
+	device_set_node(&hi->adap.dev, dev_fwnode(&pdev->dev));
 	strscpy(hi->adap.name, "harbor-i2c", sizeof(hi->adap.name));
 	i2c_set_adapdata(&hi->adap, hi);
 

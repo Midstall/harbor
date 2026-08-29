@@ -58,7 +58,7 @@ stdenv.mkDerivation {
 
   meta = {
     description = "Linux kernel modules for Harbor SoC peripherals";
-    homepage = "https://github.com/MidstallSoftware/harbor";
+    homepage = "https://github.com/LilithSemi/harbor";
     license = lib.licenses.gpl2Plus;
     platforms = lib.platforms.linux;
   };

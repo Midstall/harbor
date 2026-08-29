@@ -104,7 +104,7 @@ void main() {
         name: 'TestSoC',
         compatible: 'test,soc-v1',
         busConfig: const WishboneConfig(addressWidth: 32, dataWidth: 32),
-        svdVendor: 'Midstall',
+        svdVendor: 'Lilith Semiconductor',
         svdVersion: '3.0',
         cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
       );
@@ -114,7 +114,7 @@ void main() {
 
       final svd = soc.generateSvd();
       expect(svd, contains('<device schemaVersion="1.3"'));
-      expect(svd, contains('<vendor>Midstall</vendor>'));
+      expect(svd, contains('<vendor>Lilith Semiconductor</vendor>'));
       expect(svd, contains('<version>3.0</version>'));
       expect(svd, contains('<name>TestSoC</name>'));
       expect(svd, contains('<cpu>'));

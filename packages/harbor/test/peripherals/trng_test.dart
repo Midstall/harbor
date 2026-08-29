@@ -34,7 +34,7 @@ void main() {
         const HarborTrngConfig(baseAddress: 0x40000000, seed: 0xC0FFEE),
       );
       final dt = trng.dtNode;
-      expect(dt.compatible.first, equals('midstall,harbor-trng'));
+      expect(dt.compatible.first, equals('lilithsemi,harbor-trng'));
       expect(dt.reg.size, equals(0x1000));
     });
 

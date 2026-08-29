@@ -93,7 +93,7 @@ mixin HarborSvdPeripheralProvider {
 ///
 /// ```dart
 /// final svd = HarborSvdGenerator(
-///   vendor: 'Midstall',
+///   vendor: 'Lilith Semiconductor',
 ///   name: 'Creek V1',
 ///   version: '1.0',
 ///   cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],

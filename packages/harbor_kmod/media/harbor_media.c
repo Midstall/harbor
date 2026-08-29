@@ -304,6 +304,6 @@ static struct platform_driver harbor_media_driver = {
 };
 module_platform_driver(harbor_media_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor Media Engine driver");
 MODULE_LICENSE("GPL");

@@ -128,6 +128,6 @@ static struct platform_driver harbor_eth_driver = {
 };
 module_platform_driver(harbor_eth_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor Ethernet MAC driver");
 MODULE_LICENSE("GPL");

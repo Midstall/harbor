@@ -159,8 +159,8 @@ mixin HarborSystemMemoryProvider {
 ///
 /// ```dart
 /// final dts = HarborDeviceTreeGenerator(
-///   model: 'Midstall Creek V1',
-///   compatible: 'midstall,creek-v1',
+///   model: 'Lilith Semiconductor Creek V1',
+///   compatible: 'lilithsemi,creek-v1',
 ///   cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
 ///   peripherals: [clint, plic, uart],
 /// ).generate();

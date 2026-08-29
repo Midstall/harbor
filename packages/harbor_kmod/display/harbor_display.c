@@ -227,6 +227,6 @@ static struct platform_driver harbor_display_driver = {
 };
 module_platform_driver(harbor_display_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor Display controller driver");
 MODULE_LICENSE("GPL");

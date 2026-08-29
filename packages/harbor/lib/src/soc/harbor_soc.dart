@@ -51,7 +51,7 @@ enum HarborMemConverge {
 /// ```dart
 /// final soc = HarborSoC(
 ///   name: 'MySoC',
-///   compatible: 'midstall,creek-v1',
+///   compatible: 'lilithsemi,creek-v1',
 ///   busConfig: WishboneConfig(addressWidth: 32, dataWidth: 32),
 /// );
 ///
@@ -180,9 +180,9 @@ class HarborSoC extends BridgeModule {
     required String name,
     required this.compatible,
     required this.busConfig,
-    this.acpiOemId = 'MIDSTL',
+    this.acpiOemId = 'LILSEM',
     this.acpiOemTableId = 'HARBOR',
-    this.svdVendor = 'Midstall',
+    this.svdVendor = 'Lilith Semiconductor',
     this.svdVersion = '1.0',
     this.interruptBase = 1,
     this.externalReset = false,

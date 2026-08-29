@@ -534,6 +534,6 @@ static struct platform_driver harbor_sd_driver = {
 };
 module_platform_driver(harbor_sd_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor SD/SDIO/eMMC host controller driver");
 MODULE_LICENSE("GPL");

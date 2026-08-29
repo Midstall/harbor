@@ -219,7 +219,7 @@ static int harbor_spi_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id harbor_spi_of_match[] = {
-    {.compatible = "harbor,spi"}, {.compatible = "midstall,harbor-spi"}, {}};
+    {.compatible = "harbor,spi"}, {.compatible = "lilithsemi,harbor-spi"}, {}};
 MODULE_DEVICE_TABLE(of, harbor_spi_of_match);
 
 static struct platform_driver harbor_spi_driver = {
@@ -232,6 +232,6 @@ static struct platform_driver harbor_spi_driver = {
 };
 module_platform_driver(harbor_spi_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor SPI controller driver");
 MODULE_LICENSE("GPL");

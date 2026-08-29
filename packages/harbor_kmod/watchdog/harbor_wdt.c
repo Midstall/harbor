@@ -138,6 +138,6 @@ static struct platform_driver harbor_wdt_driver = {
 };
 module_platform_driver(harbor_wdt_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor Watchdog timer driver");
 MODULE_LICENSE("GPL");

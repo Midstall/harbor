@@ -9,7 +9,7 @@
 # Example usage in a downstream flake:
 #
 #   {
-#     inputs.harbor.url = "github:MidstallSoftware/harbor";
+#     inputs.harbor.url = "github:LilithSemi/harbor";
 #     outputs = { self, nixpkgs, harbor, ... }:
 #       let
 #         pkgs = import nixpkgs {

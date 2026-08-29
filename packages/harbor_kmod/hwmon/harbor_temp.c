@@ -153,6 +153,6 @@ static struct platform_driver harbor_temp_driver = {
 };
 module_platform_driver(harbor_temp_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor temperature sensor driver");
 MODULE_LICENSE("GPL");

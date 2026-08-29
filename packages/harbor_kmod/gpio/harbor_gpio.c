@@ -240,6 +240,6 @@ static struct platform_driver harbor_gpio_driver = {
 };
 module_platform_driver(harbor_gpio_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor GPIO controller driver");
 MODULE_LICENSE("GPL");

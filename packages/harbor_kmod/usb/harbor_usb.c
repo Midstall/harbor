@@ -249,6 +249,6 @@ static struct platform_driver harbor_usb_driver = {
 };
 module_platform_driver(harbor_usb_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor USB controller driver");
 MODULE_LICENSE("GPL");

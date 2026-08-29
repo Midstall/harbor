@@ -139,6 +139,6 @@ static struct platform_driver harbor_pwm_driver = {
 };
 module_platform_driver(harbor_pwm_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor PWM/Timer driver");
 MODULE_LICENSE("GPL");

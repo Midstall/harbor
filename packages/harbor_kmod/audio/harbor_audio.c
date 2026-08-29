@@ -198,6 +198,6 @@ static struct platform_driver harbor_audio_driver = {
 };
 module_platform_driver(harbor_audio_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor Audio Controller driver");
 MODULE_LICENSE("GPL");

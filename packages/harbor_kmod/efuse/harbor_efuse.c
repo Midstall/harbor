@@ -165,6 +165,6 @@ static struct platform_driver harbor_efuse_driver = {
 };
 module_platform_driver(harbor_efuse_driver);
 
-MODULE_AUTHOR("Midstall Software");
+MODULE_AUTHOR("Lilith Semiconductor");
 MODULE_DESCRIPTION("Harbor eFuse OTP controller driver");
 MODULE_LICENSE("GPL");

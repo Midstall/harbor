@@ -249,10 +249,10 @@ class HarborTrng extends BridgeModule with HarborDeviceTreeNodeProvider {
 
   @override
   HarborDeviceTreeNode get dtNode => HarborDeviceTreeNode(
-    compatible: ['midstall,harbor-trng'],
+    compatible: ['lilithsemi,harbor-trng'],
     reg: BusAddressRange(config.baseAddress, 0x1000),
     properties: {
-      'midstall,seeded': config.seed != 0 ? 1 : 0,
+      'lilithsemi,seeded': config.seed != 0 ? 1 : 0,
       '#address-cells': 1,
       '#size-cells': 1,
     },

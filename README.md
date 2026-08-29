@@ -164,11 +164,10 @@ my-soc-tapeout = pkgs.harbor.mkTapeout {
 
 ## License
 
-Dart library: BSD-3-Clause
+Dart library: Apache-2.0
 
 Kernel modules: GPL-2.0-or-later
 
 ## Community
 
-- **Discord**: [Join the server](https://discord.gg/HRhetTVcHG)
-- **Contact**: [inquire@midstall.com](mailto:inquire@midstall.com)
+- **Contact**: [hello@lilithsemi.com](mailto:hello@lilithsemi.com)

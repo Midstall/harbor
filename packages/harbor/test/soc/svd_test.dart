@@ -11,16 +11,16 @@ void main() {
   group('HarborSvdGenerator', () {
     test('generates a device header with vendor and version', () {
       final svd = HarborSvdGenerator(
-        vendor: 'Midstall',
+        vendor: 'Lilith Semiconductor',
         name: 'Creek V1',
         version: '2.1',
-        description: 'midstall,creek-v1',
+        description: 'lilithsemi,creek-v1',
         cpus: [HarborCpu(hartId: 0, isa: 'rv64imafdc', mmu: 'riscv,sv39')],
       ).generate();
 
       expect(svd, contains('<?xml version="1.0" encoding="utf-8"?>'));
       expect(svd, contains('<device schemaVersion="1.3"'));
-      expect(svd, contains('<vendor>Midstall</vendor>'));
+      expect(svd, contains('<vendor>Lilith Semiconductor</vendor>'));
       // Name is sanitised into a valid identifier.
       expect(svd, contains('<name>Creek_V1</name>'));
       expect(svd, contains('<version>2.1</version>'));
@@ -31,7 +31,7 @@ void main() {
 
     test('emits a cpu block derived from the first hart', () {
       final svd = HarborSvdGenerator(
-        vendor: 'Midstall',
+        vendor: 'Lilith Semiconductor',
         name: 'soc',
         cpus: [HarborCpu(hartId: 0, isa: 'rv64imafdc', mmu: 'riscv,sv39')],
       ).generate();
@@ -45,7 +45,7 @@ void main() {
 
     test('omits the cpu block and fpu when there is no float extension', () {
       final svd = HarborSvdGenerator(
-        vendor: 'Midstall',
+        vendor: 'Lilith Semiconductor',
         name: 'soc',
         cpus: [HarborCpu(hartId: 0, isa: 'rv64imac')],
       ).generate();
@@ -66,7 +66,7 @@ void main() {
       );
 
       final svd = HarborSvdGenerator(
-        vendor: 'Midstall',
+        vendor: 'Lilith Semiconductor',
         name: 'soc',
         peripherals: [dev],
       ).generate();
@@ -91,7 +91,7 @@ void main() {
       );
 
       final svd = HarborSvdGenerator(
-        vendor: 'Midstall',
+        vendor: 'Lilith Semiconductor',
         name: 'soc',
         peripherals: [dev],
       ).generate();
@@ -117,7 +117,7 @@ void main() {
       );
 
       final svd = HarborSvdGenerator(
-        vendor: 'Midstall',
+        vendor: 'Lilith Semiconductor',
         name: 'soc',
         peripherals: [dev],
         interrupts: {
@@ -141,7 +141,7 @@ void main() {
       );
 
       final svd = HarborSvdGenerator(
-        vendor: 'Midstall',
+        vendor: 'Lilith Semiconductor',
         name: 'soc',
         peripherals: [dev],
       ).generate();
